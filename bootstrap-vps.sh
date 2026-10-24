@@ -1083,14 +1083,26 @@ option_wireguard_setup() {
   say "客户端配置已写入: ${client_config}"
   say "双栈网关配置已写入: ${gateway_config}"
   print_divider
-  say "第一步：把 ${gateway_config} 复制到双栈 VPS 的 /etc/wireguard/mybox-wg0.conf。"
-  say "第二步：在双栈 VPS 执行："
+  say "第一步：在双栈 VPS 以 root 执行下面的一键网关命令（自动识别公网网卡）："
+  printf '  bash <(curl -fsSL https://cdn.jsdelivr.net/gh/weifeng88A/mybox@main/scripts/setup-wireguard-gateway.sh) --client-public-key %s\n' "${client_public}"
+  say "第二步：双栈 VPS 脚本完成后会输出 WireGuard 公钥。"
+  say "第三步：在这里填入双栈 VPS 输出的公钥，mybox 会更新客户端配置。"
   say "  apt-get update && apt-get install -y wireguard wireguard-tools iptables"
   say "  sysctl --system"
   say "  systemctl enable --now wg-quick@mybox-wg0"
   say "第三步：放行双栈 VPS 的 UDP 51820（云安全组和系统防火墙）。"
   say "第四步：确认双栈 VPS 已启动 WireGuard，然后回到本机继续。"
   print_divider
+  local gateway_public_input=""
+  prompt_read -p "请输入双栈 VPS 输出的 WireGuard 公钥（未完成配置可直接回车）: " gateway_public_input
+  if [ -n "${gateway_public_input}" ]; then
+    if printf '%s' "${gateway_public_input}" | grep -Eq '^[A-Za-z0-9+/]{42}[=]{0,2}$'; then
+      sed -i -E "s/^PublicKey = .*/PublicKey = ${gateway_public_input}/" "${client_config}"
+      ok "已更新客户端配置中的双栈网关公钥。"
+    else
+      warn "公钥格式不正确，保留原配置。"
+    fi
+  fi
   prompt_read -p "双栈 VPS 已配置并启动 WireGuard？[y/N]: " choice
   case "${choice}" in
     y|Y)
