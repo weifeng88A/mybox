@@ -1084,7 +1084,7 @@ option_wireguard_setup() {
   say "双栈网关配置已写入: ${gateway_config}"
   print_divider
   say "第一步：在双栈 VPS 以 root 执行下面的一键网关命令（自动识别公网网卡）："
-  printf '  bash <(curl -fsSL https://cdn.jsdelivr.net/gh/weifeng88A/mybox@main/scripts/setup-wireguard-gateway.sh) --client-public-key %s\n' "${client_public}"
+  printf '  bash <(curl -fsSL https://cdn.jsdelivr.net/gh/weifeng88A/mybox@main/wg.sh) %s\n' "${client_public}"
   say "第二步：双栈 VPS 脚本完成后会输出 WireGuard 公钥。"
   say "第三步：在这里填入双栈 VPS 输出的公钥，mybox 会更新客户端配置。"
   say "  apt-get update && apt-get install -y wireguard wireguard-tools iptables"
