@@ -59,7 +59,7 @@ if [ -z "${WG_CLIENT_PUBLIC_KEY}" ]; then
   echo "缺少 --client-public-key。请先在 IPv6-only VPS 的 mybox 中生成客户端配置。" >&2
   exit 1
 fi
-if ! printf '%s' "${WG_CLIENT_PUBLIC_KEY}" | grep -Eq '^[A-Za-z0-9+/]{42}[=]{0,2}$'; then
+if ! printf '%s' "${WG_CLIENT_PUBLIC_KEY}" | grep -Eq '^[A-Za-z0-9+/]{43}={0,1}$'; then
   echo "客户端公钥格式不正确。" >&2
   exit 1
 fi

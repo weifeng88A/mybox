@@ -982,7 +982,7 @@ option_wireguard_setup() {
   local gateway_public_input=""
   prompt_read -p "请输入双栈 VPS 输出的 WireGuard 公钥（未完成配置可直接回车）: " gateway_public_input
   if [ -n "${gateway_public_input}" ]; then
-    if printf '%s' "${gateway_public_input}" | grep -Eq '^[A-Za-z0-9+/]{42}[=]{0,2}$'; then
+    if printf '%s' "${gateway_public_input}" | grep -Eq '^[A-Za-z0-9+/]{43}={0,1}$'; then
       sed -i -E "s/^PublicKey = .*/PublicKey = ${gateway_public_input}/" "${client_config}"
       ok "已更新客户端配置中的双栈网关公钥。"
     else
