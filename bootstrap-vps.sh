@@ -1,0 +1,4946 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TARGET_PATH="${TARGET_PATH:-${HOME}/ssh-key-menu.sh}"
+RUN_AFTER_INSTALL=1
+INSTALL_SHORTCUT=1
+SHORTCUT_NAME="${SHORTCUT_NAME:-f}"
+MARKER="# Managed by mybox bootstrap"
+
+usage() {
+  cat <<'EOF'
+用法:
+  bash bootstrap-vps.sh [--no-run] [--target /root/ssh-key-menu.sh]
+                        [--shortcut f] [--no-shortcut]
+
+说明:
+  - 这是一个自包含安装器，内部已经包含 mybox 脚本
+  - 第一次通过 curl 获取本脚本时，当前环境访问 GitHub 仍然需要 jshook 请求头
+  - 安装完成后，以后直接输入 f 即可打开 mybox
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jshook)
+      shift 2
+      ;;
+    --no-run)
+      RUN_AFTER_INSTALL=0
+      shift
+      ;;
+    --shortcut)
+      SHORTCUT_NAME="${2:-}"
+      shift 2
+      ;;
+    --no-shortcut)
+      INSTALL_SHORTCUT=0
+      shift
+      ;;
+    --target)
+      TARGET_PATH="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "未知参数: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+ensure_local_bin_in_path() {
+  local local_bin="${HOME}/.local/bin"
+  local bashrc="${HOME}/.bashrc"
+  mkdir -p "${local_bin}"
+
+  case ":${PATH}:" in
+    *":${local_bin}:"*) return 0 ;;
+  esac
+
+  if [ -f "${bashrc}" ] && grep -Fqs "${local_bin}" "${bashrc}"; then
+    return 0
+  fi
+
+  {
+    printf '\n'
+    printf '# Added by mybox bootstrap\n'
+    printf 'export PATH="%s:$PATH"\n' "${local_bin}"
+  } >> "${bashrc}"
+}
+
+install_shortcut() {
+  local shortcut_name="$1"
+  local shortcut_path=""
+  local shortcut_dir=""
+
+  [ -n "${shortcut_name}" ] || return 0
+
+  if [ "$(id -u)" -eq 0 ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    shortcut_dir="/usr/local/bin"
+  else
+    shortcut_dir="${HOME}/.local/bin"
+    ensure_local_bin_in_path
+  fi
+
+  mkdir -p "${shortcut_dir}"
+  shortcut_path="${shortcut_dir}/${shortcut_name}"
+
+  if [ -e "${shortcut_path}" ] && ! grep -Fqs "${MARKER}" "${shortcut_path}" 2>/dev/null; then
+    echo "检测到已有文件 ${shortcut_path}，为了避免覆盖，已跳过快捷命令安装。" >&2
+    echo "你仍然可以手动运行: bash ${TARGET_PATH}" >&2
+    return 0
+  fi
+
+  cat > "${shortcut_path}" <<EOF
+#!/usr/bin/env bash
+${MARKER}
+exec bash "${TARGET_PATH}" "\$@"
+EOF
+  chmod +x "${shortcut_path}"
+  echo "已安装快捷命令: ${shortcut_name}"
+  echo "快捷命令路径: ${shortcut_path}"
+}
+
+write_menu_script() {
+  local target_dir=""
+  target_dir="$(dirname "${TARGET_PATH}")"
+  mkdir -p "${target_dir}"
+  cat > "${TARGET_PATH}" <<'MENU'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
+APP_NAME="mybox"
+REPO_SLUG="weifeng88A/mybox"
+TOOLBOX_VERSION="1.0.0"
+DEFAULT_JSHOOK="123"
+CURRENT_USER="$(id -un)"
+CURRENT_HOME="${HOME:-/root}"
+SSH_DIR="${CURRENT_HOME}/.ssh"
+AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
+MARK_BEGIN="# BEGIN VPS-SSH-KEY-MENU"
+MARK_END="# END VPS-SSH-KEY-MENU"
+REALM_BIN="/usr/local/bin/realm"
+REALM_DIR="/etc/realm"
+REALM_RULES_FILE="${REALM_DIR}/mybox-rules.tsv"
+REALM_CONFIG="${REALM_DIR}/config.toml"
+REALM_SERVICE="/etc/systemd/system/realm.service"
+NPM_DIR="/opt/npm"
+NPM_COMPOSE_FILE="${NPM_DIR}/docker-compose.yml"
+AUTO_SHUTDOWN_DIR="/etc/mybox-auto-shutdown"
+AUTO_SHUTDOWN_EXPIRY_FILE="${AUTO_SHUTDOWN_DIR}/expiry"
+AUTO_SHUTDOWN_SERVICE_UNIT="mybox-auto-shutdown.service"
+AUTO_SHUTDOWN_TIMER_UNIT="mybox-auto-shutdown.timer"
+AUTO_SHUTDOWN_SERVICE_FILE="/etc/systemd/system/${AUTO_SHUTDOWN_SERVICE_UNIT}"
+AUTO_SHUTDOWN_TIMER_FILE="/etc/systemd/system/${AUTO_SHUTDOWN_TIMER_UNIT}"
+
+C_CYAN=""
+C_GREEN=""
+C_YELLOW=""
+C_RED=""
+C_BOLD=""
+C_RESET=""
+if command -v tput >/dev/null 2>&1 && [ -n "${TERM:-}" ] && [ "${TERM}" != "dumb" ]; then
+  C_CYAN="$(tput setaf 6 2>/dev/null || true)"
+  C_GREEN="$(tput setaf 2 2>/dev/null || true)"
+  C_YELLOW="$(tput setaf 3 2>/dev/null || true)"
+  C_RED="$(tput setaf 1 2>/dev/null || true)"
+  C_BOLD="$(tput bold 2>/dev/null || true)"
+  C_RESET="$(tput sgr0 2>/dev/null || true)"
+fi
+
+say() { printf '%s\n' "$*"; }
+ok() { printf '%s%s%s\n' "${C_GREEN}" "$*" "${C_RESET}"; }
+warn() { printf '%s%s%s\n' "${C_YELLOW}" "$*" "${C_RESET}"; }
+err() { printf '%s%s%s\n' "${C_RED}" "$*" "${C_RESET}" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+get_effective_jshook() {
+  printf '%s' "${JSHOOK:-${DEFAULT_JSHOOK}}"
+}
+
+repeat_char() {
+  local char="$1"
+  local count="$2"
+  local out=""
+  while [ "${count}" -gt 0 ]; do
+    out="${out}${char}"
+    count=$((count - 1))
+  done
+  printf '%s' "${out}"
+}
+
+get_primary_ip() {
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+get_os_pretty_name() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    printf '%s' "${PRETTY_NAME:-Linux}"
+  else
+    uname -s
+  fi
+}
+
+get_docker_summary() {
+  if ! have_cmd docker; then
+    printf 'not-installed'
+    return 0
+  fi
+
+  if docker info >/dev/null 2>&1 || (have_cmd sudo && sudo docker info >/dev/null 2>&1); then
+    printf 'ready'
+  else
+    printf 'installed'
+  fi
+}
+
+get_xanmod_summary() {
+  if uname -r 2>/dev/null | grep -qi xanmod; then
+    printf 'xanmod'
+  else
+    printf 'stock'
+  fi
+}
+
+get_bbr_summary() {
+  if have_cmd sysctl; then
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf 'unknown'
+  else
+    printf 'unknown'
+  fi
+}
+
+print_divider() {
+  say "------------------------------------------------------------"
+}
+
+print_section_title() {
+  local title="$1"
+  printf '%s%s%s\n' "${C_BOLD}" "${title}" "${C_RESET}"
+}
+
+menu_item() {
+  local key="$1"
+  local label="$2"
+  printf '  %-3s %s\n' "${key}." "${label}"
+}
+
+menu_back_item() {
+  printf '  %-3s %s\n' "0." "返回上一级"
+}
+
+menu_exit_item() {
+  printf '  %-3s %s\n' "0." "退出"
+}
+
+print_logo() {
+  local primary_ip=""
+  local kernel=""
+  local os_name=""
+  local uptime_text=""
+  local border=""
+  local title_line=""
+  local line=""
+  local docker_state=""
+  local kernel_state=""
+  local bbr_state=""
+
+  primary_ip="$(get_primary_ip)"
+  kernel="$(uname -r 2>/dev/null || printf 'unknown')"
+  os_name="$(get_os_pretty_name)"
+  uptime_text="$(uptime -p 2>/dev/null || uptime 2>/dev/null || printf 'unknown')"
+  docker_state="$(get_docker_summary)"
+  kernel_state="$(get_xanmod_summary)"
+  bbr_state="$(get_bbr_summary)"
+  border="$(repeat_char "═" 62)"
+  title_line="${APP_NAME} | VPS Toolbox | v${TOOLBOX_VERSION}"
+
+  say "${C_CYAN}╔${border}╗${C_RESET}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} ${C_BOLD}$(printf '%-60.60s' "${title_line}")${C_RESET} ${C_CYAN}║${C_RESET}"
+  say "${C_CYAN}╠${border}╣${C_RESET}"
+
+  line="Host   : $(hostname)    User   : ${CURRENT_USER}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} $(printf '%-60.60s' "${line}") ${C_CYAN}║${C_RESET}"
+
+  line="IP     : ${primary_ip:-unknown}    Kernel : ${kernel}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} $(printf '%-60.60s' "${line}") ${C_CYAN}║${C_RESET}"
+
+  line="OS     : ${os_name}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} $(printf '%-60.60s' "${line}") ${C_CYAN}║${C_RESET}"
+
+  line="Uptime : ${uptime_text}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} $(printf '%-60.60s' "${line}") ${C_CYAN}║${C_RESET}"
+
+  line="Status : docker=${docker_state}   kernel=${kernel_state}   tcp=${bbr_state}"
+  printf '%s\n' "${C_CYAN}║${C_RESET} $(printf '%-60.60s' "${line}") ${C_CYAN}║${C_RESET}"
+
+  say "${C_CYAN}╚${border}╝${C_RESET}"
+}
+
+run_docker() {
+  if ! have_cmd docker; then
+    err "当前系统未安装 Docker。"
+    return 1
+  fi
+
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  elif have_cmd sudo && sudo docker info >/dev/null 2>&1; then
+    sudo docker "$@"
+  else
+    err "当前用户无法访问 Docker，请切换到 root 或加入 docker 组。"
+    return 1
+  fi
+}
+
+prompt_read() {
+  if [ -r /dev/tty ]; then
+    read -r "$@" < /dev/tty
+  else
+    read -r "$@"
+  fi
+}
+
+prompt_secret() {
+  if [ -r /dev/tty ]; then
+    read -r -s "$@" < /dev/tty
+  else
+    read -r -s "$@"
+  fi
+}
+
+run_with_tty() {
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    "$@" < /dev/tty > /dev/tty 2>&1
+  else
+    "$@"
+  fi
+}
+
+pause() { printf '\n'; prompt_read -p "按回车继续..." _; }
+
+require_cmd() {
+  if ! have_cmd "$1"; then
+    err "缺少命令: $1"
+    return 1
+  fi
+}
+
+ensure_ssh_dir() {
+  mkdir -p "${SSH_DIR}"
+  chmod 700 "${SSH_DIR}"
+  touch "${AUTHORIZED_KEYS}"
+  chmod 600 "${AUTHORIZED_KEYS}"
+}
+
+count_authorized_keys() {
+  if [ -f "${AUTHORIZED_KEYS}" ]; then
+    awk 'NF{n++} END{print n+0}' "${AUTHORIZED_KEYS}"
+  else
+    echo 0
+  fi
+}
+
+default_editor() {
+  if [ -n "${EDITOR:-}" ]; then
+    printf '%s' "${EDITOR}"
+  elif have_cmd nano; then
+    printf 'nano'
+  else
+    printf 'vi'
+  fi
+}
+
+sudo_prefix() {
+  if [ "$(id -u)" -eq 0 ]; then
+    printf ''
+  elif have_cmd sudo; then
+    printf 'sudo'
+  else
+    return 1
+  fi
+}
+
+docker_ready() {
+  have_cmd docker || return 1
+  docker info >/dev/null 2>&1 || (have_cmd sudo && sudo docker info >/dev/null 2>&1)
+}
+
+run_npm_compose() {
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    err "未找到 NPM 配置文件 ${NPM_COMPOSE_FILE}。"
+    return 1
+  fi
+
+  if docker compose version >/dev/null 2>&1; then
+    run_docker compose -f "${NPM_COMPOSE_FILE}" "$@"
+  elif have_cmd docker-compose; then
+    if [ "$(id -u)" -eq 0 ]; then
+      docker-compose -f "${NPM_COMPOSE_FILE}" "$@"
+    elif have_cmd sudo; then
+      sudo docker-compose -f "${NPM_COMPOSE_FILE}" "$@"
+    else
+      err "当前用户无法运行 docker-compose。"
+      return 1
+    fi
+  else
+    err "未检测到 Docker Compose。"
+    return 1
+  fi
+}
+
+run_root() {
+  local root_cmd=""
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限。"
+    return 1
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    "${root_cmd}" "$@"
+  else
+    "$@"
+  fi
+}
+
+effective_sshd_status() {
+  local field="$1"
+  local sshd_bin=""
+  if have_cmd sshd; then
+    sshd_bin="$(command -v sshd)"
+  elif [ -x /usr/sbin/sshd ]; then
+    sshd_bin="/usr/sbin/sshd"
+  fi
+
+  if [ -n "${sshd_bin}" ]; then
+    "${sshd_bin}" -T 2>/dev/null | awk -v key="${field}" '$1 == key {print $2; exit}'
+    return 0
+  fi
+
+  printf 'unknown'
+}
+
+password_status_text() {
+  local status
+  status="$(effective_sshd_status passwordauthentication)"
+  case "${status}" in
+    yes) printf '已启用' ;;
+    no) printf '未启用' ;;
+    *) printf '未知' ;;
+  esac
+}
+
+pubkey_status_text() {
+  local status
+  status="$(effective_sshd_status pubkeyauthentication)"
+  case "${status}" in
+    yes) printf '已启用' ;;
+    no) printf '未启用' ;;
+    *) printf '未知' ;;
+  esac
+}
+
+print_ssh_menu() {
+  clear 2>/dev/null || true
+  print_logo
+  print_section_title "SSH 登录管理"
+  say "  密码登录 : $(password_status_text)"
+  say "  公钥登录 : $(pubkey_status_text)"
+  say "  公钥条数 : $(count_authorized_keys)"
+  print_divider
+  menu_item "1" "生成本机密钥对"
+  menu_item "2" "手动输入一行公钥"
+  menu_item "3" "GitHub 导入已有公钥"
+  menu_item "4" "URL 导入已有公钥"
+  menu_item "5" "编辑公钥文件"
+  menu_item "6" "查看本机密钥"
+  menu_item "7" "查看 authorized_keys"
+  menu_item "8" "关闭密码登录"
+  menu_item "9" "开启密码登录"
+  menu_back_item
+  print_divider
+}
+
+append_keys_text() {
+  local payload="$1"
+  local tmp_file
+
+  ensure_ssh_dir
+
+  tmp_file="$(mktemp)"
+  {
+    [ -f "${AUTHORIZED_KEYS}" ] && cat "${AUTHORIZED_KEYS}"
+    printf '%s\n' "${payload}"
+  } | awk 'NF && !seen[$0]++' > "${tmp_file}"
+
+  mv "${tmp_file}" "${AUTHORIZED_KEYS}"
+  chmod 600 "${AUTHORIZED_KEYS}"
+}
+
+validate_public_key_line() {
+  case "$1" in
+    ssh-*|ecdsa-*|sk-ssh-*|sk-ecdsa-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fetch_url_text() {
+  local url="$1"
+  local jshook="${2:-}"
+  local effective_jshook=""
+
+  if [ -z "${jshook}" ]; then
+    effective_jshook="$(get_effective_jshook)"
+  else
+    effective_jshook="${jshook}"
+  fi
+
+  if have_cmd curl; then
+    if [ -n "${effective_jshook}" ]; then
+      curl -fsSL -H "jshook: ${effective_jshook}" "${url}"
+    else
+      curl -fsSL "${url}"
+    fi
+  elif have_cmd wget; then
+    if [ -n "${effective_jshook}" ]; then
+      wget -qO- --header="jshook: ${effective_jshook}" "${url}"
+    else
+      wget -qO- "${url}"
+    fi
+  else
+    err "需要 curl 或 wget 其中一个命令。"
+    return 1
+  fi
+}
+
+option_generate_keypair() {
+  require_cmd ssh-keygen || return 1
+  ensure_ssh_dir
+
+  local default_path="${SSH_DIR}/id_ed25519"
+  local key_path=""
+  local comment=""
+
+  prompt_read -p "密钥保存路径 [${default_path}]: " key_path
+  key_path="${key_path:-${default_path}}"
+
+  if [ -e "${key_path}" ] || [ -e "${key_path}.pub" ]; then
+    prompt_read -p "文件已存在，是否覆盖？[y/N]: " confirm
+    case "${confirm}" in
+      y|Y) ;;
+      *) warn "已取消。"; return 0 ;;
+    esac
+  fi
+
+  prompt_read -p "注释 [${CURRENT_USER}@$(hostname)]: " comment
+  comment="${comment:-${CURRENT_USER}@$(hostname)}"
+
+  run_with_tty ssh-keygen -t ed25519 -f "${key_path}" -C "${comment}"
+  ok "已生成密钥：${key_path}"
+  [ -f "${key_path}.pub" ] && say "公钥内容：" && cat "${key_path}.pub"
+}
+
+option_manual_key() {
+  local key_line=""
+  prompt_read -p "请粘贴一整行 SSH 公钥: " key_line
+
+  if [ -z "${key_line}" ]; then
+    warn "没有输入内容。"
+    return 0
+  fi
+
+  if ! validate_public_key_line "${key_line}"; then
+    err "这看起来不像标准 SSH 公钥。"
+    return 1
+  fi
+
+  append_keys_text "${key_line}"
+  ok "公钥已写入 ${AUTHORIZED_KEYS}"
+}
+
+option_import_github() {
+  local gh_user=""
+  local url=""
+  local body=""
+
+  prompt_read -p "GitHub 用户名: " gh_user
+  if [ -z "${gh_user}" ]; then
+    warn "GitHub 用户名不能为空。"
+    return 0
+  fi
+
+  url="https://github.com/${gh_user}.keys"
+  body="$(fetch_url_text "${url}")" || return 1
+
+  if [ -z "${body}" ]; then
+    err "没有拉取到任何公钥，请确认 ${gh_user} 账号下已经上传了公钥。"
+    return 1
+  fi
+
+  append_keys_text "${body}"
+  ok "已从 GitHub 导入公钥。"
+}
+
+option_import_url() {
+  local url=""
+  local body=""
+
+  prompt_read -p "公钥 URL: " url
+  if [ -z "${url}" ]; then
+    warn "URL 不能为空。"
+    return 0
+  fi
+
+  body="$(fetch_url_text "${url}")" || return 1
+
+  if [ -z "${body}" ]; then
+    err "URL 返回为空。"
+    return 1
+  fi
+
+  append_keys_text "${body}"
+  ok "已从 URL 导入公钥。"
+}
+
+option_edit_authorized_keys() {
+  ensure_ssh_dir
+  local editor
+  editor="$(default_editor)"
+  run_with_tty "${editor}" "${AUTHORIZED_KEYS}"
+}
+
+option_view_local_keys() {
+  ensure_ssh_dir
+  say "SSH 目录: ${SSH_DIR}"
+  say "--------------------------------------------------"
+  ls -la "${SSH_DIR}" 2>/dev/null || true
+  say "--------------------------------------------------"
+  if ls "${SSH_DIR}"/*.pub >/dev/null 2>&1; then
+    for pub_file in "${SSH_DIR}"/*.pub; do
+      say ">>> ${pub_file}"
+      cat "${pub_file}"
+      say ""
+    done
+  else
+    warn "当前目录下还没有 .pub 公钥文件。"
+  fi
+}
+
+option_view_authorized_keys() {
+  ensure_ssh_dir
+  if [ ! -s "${AUTHORIZED_KEYS}" ]; then
+    warn "${AUTHORIZED_KEYS} 还是空的。"
+    return 0
+  fi
+
+  say "文件: ${AUTHORIZED_KEYS}"
+  say "--------------------------------------------------"
+  nl -ba "${AUTHORIZED_KEYS}"
+}
+
+option_show_system_info() {
+  local os_name="unknown"
+  local local_ip="unknown"
+
+  if [ -r /etc/os-release ]; then
+    os_name="$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-unknown}")"
+  fi
+
+  if have_cmd hostname; then
+    local_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || printf 'unknown')"
+  fi
+
+  say "${C_BOLD}${C_CYAN}系统信息${C_RESET}"
+  say "--------------------------------------------------"
+  say "主机名: $(hostname)"
+  say "当前用户: ${CURRENT_USER}"
+  say "系统: ${os_name}"
+  say "内核: $(uname -srmo 2>/dev/null || uname -a)"
+  say "本机 IP: ${local_ip}"
+  say "启动时间: $(uptime -p 2>/dev/null || uptime)"
+  say "时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  say "--------------------------------------------------"
+
+  if have_cmd free; then
+    say "[内存]"
+    free -h
+    say "--------------------------------------------------"
+  fi
+
+  if have_cmd df; then
+    say "[磁盘]"
+    df -h /
+    say "--------------------------------------------------"
+  fi
+
+  if have_cmd ss; then
+    say "[监听端口]"
+    ss -tulpn 2>/dev/null | sed -n '1,12p'
+  fi
+}
+
+option_mybox_speed_info() {
+  say "${C_BOLD}${C_CYAN}mybox Speed${C_RESET}"
+  say "--------------------------------------------------"
+  say "仓库: https://github.com/weifeng88A/mybox"
+  say "用途: TCP 智能调优 + XanMod / BBRv3 + Argo VMess WebSocket 节点部署"
+  say "要求: Debian / Ubuntu、root、Cloudflare / GitHub 出站正常"
+  say "运行方式: 会从 GitHub 拉取 mybox 内置 scripts/mybox-speed.sh 并执行"
+  say "功能: 完整流程、重启续跑、doctor、repair、speedtest、netcheck、订阅输出"
+  say "--------------------------------------------------"
+}
+
+option_vless_project_info() {
+  say "${C_BOLD}${C_CYAN}vless-xhttp-reality-self${C_RESET}"
+  say "--------------------------------------------------"
+  say "仓库: https://github.com/tao-t356/vless-xhttp-reality-self"
+  say "用途: 启动上游最新安装、更新和管理菜单"
+  say "要求: root、Linux amd64；具体要求以上游菜单为准"
+  say "运行方式: 每次直接下载并执行上游 main/install.sh，自动跟随上游更新"
+  say "--------------------------------------------------"
+}
+
+run_remote_installer() {
+  local project_name="$1"
+  local project_url="$2"
+  local note="${3:-}"
+  local script_arg="${4:-}"
+  local preset_domain="${5:-}"
+  local jshook=""
+  local tmp_file=""
+  local download_url=""
+  local fallback_url=""
+  local download_tool=""
+  local download_ok=0
+  local old_mybox_preset_domain="${MYBOX_PRESET_DOMAIN-}"
+  local had_mybox_preset_domain=0
+
+  if [ "$(id -u)" -ne 0 ]; then
+    err "${project_name} 建议使用 root 运行。"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
+
+  jshook="$(get_effective_jshook)"
+  download_url="${project_url}"
+
+  case "${project_url}" in
+    https://raw.githubusercontent.com/weifeng88A/mybox/main/scripts/mybox-speed.sh)
+      download_url="https://api.github.com/repos/weifeng88A/mybox/contents/scripts/mybox-speed.sh?ref=main&ts=$(date +%s)"
+      ;;
+    https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh)
+      download_url="https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/install.sh?ref=main&ts=$(date +%s)"
+      ;;
+    https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh)
+      download_url="https://api.github.com/repos/tao-t356/Docker-Nginx-Proxy-Manager/contents/install.sh?ref=main&ts=$(date +%s)"
+      ;;
+  esac
+
+  if [ "${download_url}" != "${project_url}" ]; then
+    fallback_url="${project_url}"
+    case "${fallback_url}" in
+      *\?*) fallback_url="${fallback_url}&ts=$(date +%s)" ;;
+      *) fallback_url="${fallback_url}?ts=$(date +%s)" ;;
+    esac
+  fi
+
+  if ! tmp_file="$(mktemp)"; then
+    err "无法创建临时文件。"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
+  if have_cmd curl; then
+    download_tool="curl"
+    if printf '%s' "${download_url}" | grep -q '^https://api.github.com/repos/'; then
+      if curl -fsSL -H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
+    else
+      if curl -fsSL -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
+    fi
+  elif have_cmd wget; then
+    download_tool="wget"
+    if printf '%s' "${download_url}" | grep -q '^https://api.github.com/repos/'; then
+      if wget -qO "${tmp_file}" --header="Accept: application/vnd.github.raw" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"; then
+        download_ok=1
+      fi
+    else
+      if wget -qO "${tmp_file}" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"; then
+        download_ok=1
+      fi
+    fi
+  else
+    err "需要 curl 或 wget 其中一个命令。"
+    rm -f "${tmp_file}"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
+
+  if [ "${download_ok}" -eq 1 ]; then
+    if [ ! -s "${tmp_file}" ] || ! bash -n "${tmp_file}" >/dev/null 2>&1; then
+      warn "主下载地址返回的脚本内容无效。"
+      download_ok=0
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ] && [ -n "${fallback_url}" ]; then
+    warn "GitHub API 下载失败或内容无效，改用上游 raw 地址重试。"
+    download_ok=0
+    if [ "${download_tool}" = "curl" ]; then
+      if curl -fsSL -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${fallback_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
+    else
+      if wget -qO "${tmp_file}" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${fallback_url}"; then
+        download_ok=1
+      fi
+    fi
+    if [ "${download_ok}" -eq 1 ]; then
+      if [ ! -s "${tmp_file}" ] || ! bash -n "${tmp_file}" >/dev/null 2>&1; then
+        download_ok=0
+      fi
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ]; then
+    err "下载到的 ${project_name} 安装脚本不可用，已停止执行。"
+    rm -f "${tmp_file}"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
+
+  local rc=0
+  if [ "${MYBOX_PRESET_DOMAIN+x}" = "x" ]; then
+    had_mybox_preset_domain=1
+  fi
+  if [ -n "${preset_domain}" ]; then
+    export MYBOX_PRESET_DOMAIN="${preset_domain}"
+  fi
+
+  if [ -n "${script_arg}" ]; then
+    run_with_tty bash "${tmp_file}" "${script_arg}" || rc=$?
+  else
+    run_with_tty bash "${tmp_file}" || rc=$?
+  fi
+
+  if [ "${had_mybox_preset_domain}" -eq 1 ]; then
+    export MYBOX_PRESET_DOMAIN="${old_mybox_preset_domain}"
+  else
+    unset MYBOX_PRESET_DOMAIN
+  fi
+
+  if [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh" ]; then
+    refresh_vless_project_legacy_launcher
+  fi
+
+  rm -f "${tmp_file}"
+  if [ "${rc}" -ne 0 ]; then
+    warn "${project_name} 已退出，返回码: ${rc}"
+  fi
+  printf '\n'
+  prompt_read -p "按回车返回工具箱..." _
+  return 0
+}
+
+refresh_vless_project_legacy_launcher() {
+  local bin_path="/usr/local/bin/vless-xhttp-reality-self"
+  local legacy_path="/usr/local/bin/vless-xhttp-reality-self.sh"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    return 0
+  fi
+
+  [ -x "${bin_path}" ] || return 0
+  mkdir -p "$(dirname "${legacy_path}")" 2>/dev/null || return 0
+
+  if cat > "${legacy_path}" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/vless-xhttp-reality-self "$@"
+EOF
+  then
+    chmod 0755 "${legacy_path}" 2>/dev/null || true
+    say "已刷新旧命令兼容入口: ${legacy_path}"
+  else
+    warn "未能刷新旧命令兼容入口: ${legacy_path}"
+  fi
+}
+
+
+option_run_mybox_speed() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        warn "当前系统不是 Debian / Ubuntu，脚本可能不兼容。"
+        ;;
+    esac
+  fi
+
+  run_remote_installer \
+    "mybox Speed" \
+    "https://raw.githubusercontent.com/weifeng88A/mybox/main/scripts/mybox-speed.sh" \
+    "它会进入 mybox Speed 一体化流程：XanMod / BBRv3 / TCP 调优 + 节点部署。"
+}
+
+option_run_bbr_direct_optimize() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        warn "当前系统不是 Debian / Ubuntu，脚本可能不兼容。"
+        ;;
+    esac
+  fi
+
+  run_remote_installer \
+    "mybox Speed · BBR 直连/落地优化" \
+    "https://raw.githubusercontent.com/weifeng88A/mybox/main/scripts/mybox-speed.sh" \
+    "对接 Eric86777/vps-tcp-tune 菜单 3：BBR 直连/落地优化（智能带宽检测）。" \
+    "--tcp-direct"
+}
+option_run_vless_project() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        warn "当前系统不是 Debian / Ubuntu，脚本可能不兼容。"
+        ;;
+    esac
+  fi
+
+  say "即将直接运行 vless-xhttp-reality-self 上游最新安装脚本。"
+  say "- 上游命令: bash <(curl -fsSL https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh)"
+  say "- mybox 仅负责可靠下载、TTY 交互和旧命令兼容，不再固定 dist 版本"
+  printf '\n'
+  run_remote_installer \
+    "vless-xhttp-reality-self" \
+    "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh"
+}
+
+option_npm_docker_info() {
+  say "${C_BOLD}${C_CYAN}Docker + Nginx Proxy Manager${C_RESET}"
+  say "--------------------------------------------------"
+  say "仓库: https://github.com/tao-t356/Docker-Nginx-Proxy-Manager"
+  say "用途: 安装 / 卸载 Docker 与 Nginx Proxy Manager"
+  say "原始命令: wget -qO n https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh && bash n"
+  say "当前工具箱会改成 jshook 兼容方式下载后执行。"
+  say "--------------------------------------------------"
+}
+
+option_run_npm_docker() {
+  run_remote_installer \
+    "Docker-Nginx-Proxy-Manager" \
+    "https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh" \
+    "上游菜单可安装或卸载 Docker 与 Nginx Proxy Manager。"
+}
+
+option_nexttrace_info() {
+  say "${C_BOLD}${C_CYAN}NextTrace${C_RESET}"
+  say "--------------------------------------------------"
+  say "官网: https://nxtrace.org"
+  say "用途: 路由追踪 / 网络诊断"
+  say "原始命令: curl -sL https://nxtrace.org/nt | bash"
+  say "当前工具箱会改成 jshook 兼容方式下载后执行。"
+  say "--------------------------------------------------"
+}
+
+option_run_nexttrace() {
+  run_remote_installer \
+    "NextTrace" \
+    "https://nxtrace.org/nt" \
+    "它会在线安装 NextTrace。"
+}
+
+option_run_nodequality() {
+  run_remote_installer \
+    "NodeQuality 综合测评" \
+    "https://run.NodeQuality.com" \
+    "它会运行 NodeQuality 的 VPS 综合测评。"
+}
+
+option_run_warp() {
+  local warp_url=""
+  warp_url="${WARP_INSTALLER_URL:-https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh}"
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu|centos|rhel|fedora|alpine) ;;
+      *) warn "当前系统未在 fscarmen 常见支持列表内，脚本可能不兼容。" ;;
+    esac
+  fi
+
+  say "${C_BOLD}${C_CYAN}Cloudflare WARP (fscarmen)${C_RESET}"
+  say "--------------------------------------------------"
+  say "用途: 补齐双栈 IPv4/IPv6、全局出站、socks5 分流、WARP+"
+  say "来源: ${warp_url}"
+  say "说明: 将打开 fscarmen WARP 菜单，双栈相关选项在该菜单内选择。"
+  say "提示: 当前受控网络访问 GitHub 需 jshook；若默认 gitlab 源拉不到，"
+  say "      可用 GitHub 镜像覆盖：export WARP_INSTALLER_URL=<镜像地址> 后重试。"
+  say "--------------------------------------------------"
+
+  run_remote_installer \
+    "WARP (fscarmen)" \
+    "${warp_url}" \
+    "它会打开 fscarmen WARP 菜单，可配置双栈 IPv4/IPv6、全局出站、socks5、WARP+。"
+}
+
+option_xanmod_info() {
+  local level="unknown"
+  local package_name="unknown"
+  local current_kernel=""
+  local current_cc="unknown"
+  local current_qdisc="unknown"
+
+  level="$(detect_x86_64_psabi_level 2>/dev/null || printf 'unknown')"
+  package_name="$(detect_xanmod_package 2>/dev/null || printf 'unknown')"
+  current_kernel="$(uname -r 2>/dev/null || printf 'unknown')"
+  if have_cmd sysctl; then
+    current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf 'unknown')"
+    current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf 'unknown')"
+  fi
+
+  say "${C_BOLD}${C_CYAN}XanMod / BBRv3 状态${C_RESET}"
+  say "--------------------------------------------------"
+  say "当前内核: ${current_kernel}"
+  if printf '%s' "${current_kernel}" | grep -qi xanmod; then
+    say "XanMod 状态: 已安装"
+  else
+    say "XanMod 状态: 未检测到"
+  fi
+  say "CPU x86-64 psABI level: ${level}"
+  say "推荐安装包: ${package_name}"
+  say "当前拥塞控制算法: ${current_cc}"
+  say "当前默认队列算法: ${current_qdisc}"
+  say "说明: XanMod 官方当前标注内置并默认启用 Google's BBRv3 TCP congestion control（名称仍显示为 bbr）"
+  say "--------------------------------------------------"
+}
+
+option_install_xanmod() {
+  local root_cmd=""
+  local jshook=""
+  local package_name=""
+  local codename=""
+  local tmp_script=""
+
+  if [ "$(uname -m 2>/dev/null)" != "x86_64" ]; then
+    err "当前只为 x86_64 设计了 XanMod 安装流程。"
+    return 1
+  fi
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        err "XanMod 安装流程当前只支持 Debian / Ubuntu。"
+        return 1
+        ;;
+    esac
+  fi
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能安装 XanMod。"
+    return 1
+  fi
+
+  package_name="$(detect_xanmod_package 2>/dev/null || true)"
+  codename="$(get_linux_codename 2>/dev/null || true)"
+  if [ -z "${package_name}" ]; then
+    err "无法识别 CPU 等级，已停止。"
+    return 1
+  fi
+
+  say "即将安装 XanMod 内核。"
+  say "系统代号: ${codename:-unknown}"
+  say "XanMod APT suite: ${codename}"
+  say "推荐安装包: ${package_name}"
+  say "说明: XanMod 官方当前包含并默认启用 BBRv3（名称显示为 bbr）。"
+  say "安装完成后通常需要重启服务器。"
+
+  jshook="$(get_effective_jshook)"
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<EOF
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+mkdir -p /etc/apt/keyrings
+rm -f /etc/apt/sources.list.d/xanmod-release.list
+
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update -y
+  apt-get install -y ca-certificates curl wget gnupg lsb-release
+fi
+
+rm -f /etc/apt/keyrings/xanmod-archive-keyring.gpg
+curl -fsSL -H "jshook: ${jshook}" https://dl.xanmod.org/archive.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
+if ! curl -fsI "https://deb.xanmod.org/dists/${codename}/Release" >/dev/null 2>&1 \
+  && ! curl -fsI "http://deb.xanmod.org/dists/${codename}/Release" >/dev/null 2>&1; then
+  echo "XanMod APT 仓库当前不提供 ${codename} Release。"
+  echo "当前可访问的 suite 通常包括 noble / bookworm / trixie / sid。"
+  echo "Ubuntu 22.04 jammy 建议升级到 Ubuntu 24.04 noble，或改用受支持的 Debian/Ubuntu。"
+  exit 1
+fi
+echo "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
+
+apt-get update
+apt-get install -y ${package_name}
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}"
+  else
+    bash "${tmp_script}"
+  fi
+  rm -f "${tmp_script}"
+
+  ok "XanMod 安装命令已执行完成。"
+  warn "请确认安装日志无报错。切换到 XanMod 新内核需要重启系统。"
+  prompt_read -p "是否现在重启系统以切换到新内核？(回车默认重启) [Y/n]: " reboot_now
+  case "${reboot_now}" in
+    n|N)
+      warn "已跳过重启。你可以稍后在“系统工具 -> 重启服务器”里手动重启。"
+      ;;
+    *)
+      option_reboot_server
+      ;;
+  esac
+}
+
+option_bbr_info() {
+  local cc="unknown"
+  local qdisc="unknown"
+  local available="unknown"
+
+  if have_cmd sysctl; then
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf 'unknown')"
+    qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf 'unknown')"
+    available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf 'unknown')"
+  fi
+
+  say "${C_BOLD}${C_CYAN}BBR 状态${C_RESET}"
+  say "--------------------------------------------------"
+  say "当前拥塞控制算法: ${cc}"
+  say "当前默认队列算法: ${qdisc}"
+  say "内核支持的拥塞控制: ${available}"
+  if printf '%s' "${available}" | grep -qw bbr; then
+    say "BBR 支持状态: 支持"
+  else
+    say "BBR 支持状态: 可能不支持"
+  fi
+  if [ "${cc}" = "bbr" ]; then
+    say "BBR 启用状态: 已启用"
+  else
+    say "BBR 启用状态: 未启用"
+  fi
+  say "--------------------------------------------------"
+}
+
+option_enable_bbr() {
+  local root_cmd=""
+  local tmp_script=""
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能启用 BBR。"
+    return 1
+  fi
+
+  say "即将启用 BBR。"
+  say "会写入:"
+  say "- /etc/modules-load.d/bbr.conf"
+  say "- /etc/sysctl.d/99-vps-toolbox-bbr.conf"
+  prompt_read -p "确认继续？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -e
+
+mkdir -p /etc/modules-load.d /etc/sysctl.d
+
+cat > /etc/modules-load.d/bbr.conf <<'CONF'
+tcp_bbr
+sch_fq
+CONF
+
+cat > /etc/sysctl.d/99-vps-toolbox-bbr.conf <<'CONF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+CONF
+
+modprobe sch_fq 2>/dev/null || true
+modprobe tcp_bbr 2>/dev/null || true
+
+if command -v sysctl >/dev/null 2>&1; then
+  sysctl --system >/dev/null
+fi
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}"
+  else
+    bash "${tmp_script}"
+  fi
+  rm -f "${tmp_script}"
+
+  option_bbr_info
+}
+
+option_system_cleanup() {
+  local root_cmd=""
+  local tmp_script=""
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能执行系统清理。"
+    return 1
+  fi
+
+  say "即将执行系统清理："
+  say "- apt / dnf / yum 缓存清理"
+  say "- 无用依赖清理"
+  say "- journal 日志保留最近 7 天"
+  prompt_read -p "确认继续？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  say "清理前磁盘使用："
+  df -h /
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -e
+
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get autoremove -y
+  apt-get autoclean -y
+  apt-get clean -y
+elif command -v dnf >/dev/null 2>&1; then
+  dnf autoremove -y || true
+  dnf clean all || true
+elif command -v yum >/dev/null 2>&1; then
+  yum autoremove -y || true
+  yum clean all || true
+fi
+
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --vacuum-time=7d || true
+fi
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}"
+  else
+    bash "${tmp_script}"
+  fi
+  rm -f "${tmp_script}"
+
+  say "清理后磁盘使用："
+  df -h /
+}
+
+get_npm_summary() {
+  local container_id=""
+  local state=""
+
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    printf 'not-installed'
+    return 0
+  fi
+  if ! docker_ready; then
+    printf 'installed'
+    return 0
+  fi
+
+  container_id="$(run_npm_compose ps -q app 2>/dev/null | head -n 1 || true)"
+  if [ -z "${container_id}" ]; then
+    printf 'stopped'
+    return 0
+  fi
+  state="$(run_docker inspect --format '{{.State.Status}}' "${container_id}" 2>/dev/null || true)"
+  case "${state}" in
+    running|restarting|paused) printf '%s' "${state}" ;;
+    *) printf 'stopped' ;;
+  esac
+}
+
+npm_state_text() {
+  case "$1" in
+    running) printf '运行中' ;;
+    restarting) printf '重启中' ;;
+    paused) printf '已暂停' ;;
+    stopped) printf '已停止' ;;
+    installed) printf '已安装 / Docker 不可用' ;;
+    *) printf '未安装' ;;
+  esac
+}
+
+print_docker_npm_menu_status() {
+  local running_count=0
+  local total_count=0
+  local npm_state=""
+
+  npm_state="$(get_npm_summary)"
+  if ! have_cmd docker; then
+    say "  Docker : 未安装"
+  elif ! docker_ready; then
+    say "  Docker : 已安装，但服务不可用或当前用户无权限"
+  else
+    running_count="$(run_docker ps -q 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+    total_count="$(run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+    say "  Docker : 就绪（运行 ${running_count} / 总计 ${total_count}）"
+  fi
+  say "  NPM    : $(npm_state_text "${npm_state}")"
+}
+
+option_docker_status() {
+  local running_count=0
+  local total_count=0
+  local npm_state=""
+  local panel_ip=""
+
+  say "${C_BOLD}${C_CYAN}Docker + NPM 状态总览${C_RESET}"
+  print_divider
+  if ! have_cmd docker; then
+    warn "当前系统未安装 Docker。可返回后选择安装管理。"
+    return 0
+  fi
+
+  docker --version 2>/dev/null || true
+  if docker compose version >/dev/null 2>&1; then
+    docker compose version 2>/dev/null || true
+  elif have_cmd docker-compose; then
+    docker-compose --version 2>/dev/null || true
+  else
+    warn "未检测到 Docker Compose。"
+  fi
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    have_cmd systemctl && systemctl --no-pager --full status docker 2>/dev/null | sed -n '1,8p' || true
+    return 0
+  fi
+
+  run_docker info --format 'Server: {{.ServerVersion}} | Storage: {{.Driver}} | Root: {{.DockerRootDir}}' 2>/dev/null || true
+  running_count="$(run_docker ps -q 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+  total_count="$(run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+  say "容器: 运行 ${running_count} / 停止 $((total_count - running_count)) / 总计 ${total_count}"
+
+  npm_state="$(get_npm_summary)"
+  say "NPM: $(npm_state_text "${npm_state}")"
+  if [ -f "${NPM_COMPOSE_FILE}" ]; then
+    say "配置: ${NPM_COMPOSE_FILE}"
+    panel_ip="$(get_primary_ip)"
+    say "面板: http://${panel_ip:-服务器IP}:81"
+    if have_cmd curl && curl -fsS --max-time 3 http://127.0.0.1:81 >/dev/null 2>&1; then
+      ok "健康检查: 127.0.0.1:81 可访问"
+    else
+      warn "健康检查: 127.0.0.1:81 暂不可访问"
+    fi
+  fi
+  print_divider
+  run_docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
+}
+
+docker_container_record_count() {
+  run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}'
+}
+
+option_docker_list_all() {
+  local index=0
+  local total_count=0
+  local name=""
+  local status=""
+  local ports=""
+  local image=""
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  total_count="$(docker_container_record_count)"
+  if [ "${total_count}" -eq 0 ]; then
+    warn "当前没有容器。"
+    return 0
+  fi
+
+  say "${C_BOLD}${C_CYAN}Docker 容器列表${C_RESET}"
+  print_divider
+  while IFS='|' read -r name status ports image; do
+    [ -n "${name}" ] || continue
+    index=$((index + 1))
+    say "[${index}] ${name}  [${status}]"
+    say "    镜像: ${image}"
+    say "    端口: ${ports:-无}"
+    [ "${index}" -ge "${total_count}" ] || printf '\n'
+  done < <(run_docker ps -a --format '{{.Names}}|{{.Status}}|{{.Ports}}|{{.Image}}')
+  print_divider
+}
+
+docker_resolve_container() {
+  local selector="$1"
+  local resolved=""
+
+  if printf '%s' "${selector}" | grep -Eq '^[0-9]+$'; then
+    resolved="$(run_docker ps -a --format '{{.Names}}' | sed -n "${selector}p")"
+  else
+    resolved="$(run_docker inspect --type container --format '{{.Name}}' "${selector}" 2>/dev/null | sed 's#^/##' || true)"
+  fi
+  printf '%s' "${resolved}"
+}
+
+choose_docker_container() {
+  local result_var="$1"
+  local action_label="$2"
+  local selector=""
+  local resolved_name=""
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 1
+  fi
+  if [ "$(docker_container_record_count)" -eq 0 ]; then
+    warn "当前没有容器。"
+    return 1
+  fi
+
+  option_docker_list_all
+  prompt_read -p "请输入要${action_label}的容器序号、名称或 ID: " selector
+  resolved_name="$(docker_resolve_container "${selector}")"
+  if [ -z "${resolved_name}" ]; then
+    err "未找到对应容器。"
+    return 1
+  fi
+  printf -v "${result_var}" '%s' "${resolved_name}"
+}
+
+option_docker_control_one() {
+  local action="$1"
+  local action_label="$2"
+  local container_name=""
+  choose_docker_container container_name "${action_label}" || return 0
+  run_docker "${action}" "${container_name}"
+}
+
+option_docker_logs() {
+  local container_name=""
+  choose_docker_container container_name "查看日志" || return 0
+  run_docker logs --tail 100 "${container_name}"
+}
+
+option_docker_live_logs() {
+  local container_name=""
+  local rc=0
+  choose_docker_container container_name "实时查看日志" || return 0
+  say "按 Ctrl+C 结束实时日志并返回菜单。"
+  run_docker logs -f --tail 100 "${container_name}" || rc=$?
+  case "${rc}" in 0|130) return 0 ;; *) return "${rc}" ;; esac
+}
+
+option_docker_stats_one() {
+  local container_name=""
+  choose_docker_container container_name "查看资源占用" || return 0
+  run_docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}' "${container_name}"
+}
+
+option_docker_inspect_one() {
+  local container_name=""
+  local port_output=""
+  choose_docker_container container_name "查看详情" || return 0
+  run_docker inspect --format '名称: {{.Name}}
+ID: {{.Id}}
+镜像: {{.Config.Image}}
+状态: {{.State.Status}}
+创建时间: {{.Created}}
+启动时间: {{.State.StartedAt}}
+重启策略: {{.HostConfig.RestartPolicy.Name}}
+网络地址: {{range $name, $network := .NetworkSettings.Networks}}{{$name}}={{$network.IPAddress}} {{end}}' "${container_name}"
+  say "端口映射:"
+  port_output="$(run_docker port "${container_name}" 2>/dev/null || true)"
+  if [ -n "${port_output}" ]; then say "${port_output}"; else say "无"; fi
+}
+
+option_docker_remove_one() {
+  local container_name=""
+  local state=""
+  local confirm=""
+  choose_docker_container container_name "删除" || return 0
+  state="$(run_docker inspect --format '{{.State.Status}}' "${container_name}")"
+  if [ "${state}" = "running" ]; then
+    err "容器 ${container_name} 正在运行，请先停止后再删除。"
+    return 1
+  fi
+  prompt_read -p "确认删除容器 ${container_name}？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) run_docker rm "${container_name}" ;;
+    *) warn "已取消。" ;;
+  esac
+}
+
+option_docker_start_all() {
+  local ids=""
+  ids="$(run_docker ps -aq 2>/dev/null || true)"
+  if [ -z "${ids}" ]; then
+    warn "当前没有容器。"
+    return 0
+  fi
+  run_docker start ${ids}
+}
+
+option_docker_stop_all() {
+  local ids=""
+  ids="$(run_docker ps -q 2>/dev/null || true)"
+  if [ -z "${ids}" ]; then
+    warn "当前没有运行中的容器。"
+    return 0
+  fi
+  run_docker stop ${ids}
+}
+
+option_docker_restart_all() {
+  local ids=""
+  ids="$(run_docker ps -q 2>/dev/null || true)"
+  if [ -z "${ids}" ]; then
+    warn "当前没有运行中的容器。"
+    return 0
+  fi
+  run_docker restart ${ids}
+}
+
+option_npm_status() {
+  local state=""
+  local panel_ip=""
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    warn "未发现 NPM 安装目录 ${NPM_DIR}。"
+    return 0
+  fi
+  if ! docker_ready; then
+    err "Docker 服务不可用，无法查询 NPM。"
+    return 1
+  fi
+  state="$(get_npm_summary)"
+  panel_ip="$(get_primary_ip)"
+  say "${C_BOLD}${C_CYAN}Nginx Proxy Manager${C_RESET}"
+  print_divider
+  say "状态: $(npm_state_text "${state}")"
+  say "目录: ${NPM_DIR}"
+  say "面板: http://${panel_ip:-服务器IP}:81"
+  run_npm_compose ps || true
+  if have_cmd curl && curl -fsS --max-time 3 http://127.0.0.1:81 >/dev/null 2>&1; then
+    ok "健康检查通过。"
+  else
+    warn "81 端口暂不可访问。"
+  fi
+}
+
+option_npm_start() {
+  run_npm_compose up -d
+}
+
+option_npm_stop() {
+  run_npm_compose stop
+}
+
+option_npm_restart() {
+  run_npm_compose restart
+}
+
+option_npm_logs() {
+  run_npm_compose logs --tail 100
+}
+
+option_npm_update() {
+  local confirm=""
+  prompt_read -p "确认拉取最新 NPM 镜像并重新创建容器？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y)
+      run_npm_compose pull || return 1
+      run_npm_compose up -d || return 1
+      option_npm_status
+      ;;
+    *) warn "已取消。" ;;
+  esac
+}
+
+option_npm_backup() {
+  local backup_dir="${CURRENT_HOME}/mybox-backups"
+  local backup_file="${backup_dir}/npm-$(date +%Y%m%d-%H%M%S).tar.gz"
+  local was_running=0
+  local rc=0
+  local npm_state=""
+
+  if [ ! -d "${NPM_DIR}" ]; then
+    warn "未发现 NPM 数据目录 ${NPM_DIR}。"
+    return 0
+  fi
+  mkdir -p "${backup_dir}" || return 1
+  npm_state="$(get_npm_summary)"
+  case "${npm_state}" in
+    running|restarting|paused)
+      was_running=1
+      say "为保证 SQLite 数据一致，将短暂停止 NPM。"
+      run_npm_compose stop || return 1
+      ;;
+  esac
+
+  run_root tar -czf "${backup_file}" -C /opt npm || rc=$?
+  if [ "${was_running}" -eq 1 ]; then
+    run_npm_compose up -d || warn "备份后未能自动启动 NPM，请手动检查。"
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    err "NPM 备份失败。"
+    return "${rc}"
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    run_root chown "$(id -u):$(id -g)" "${backup_file}" || true
+  fi
+  ok "NPM 备份完成: ${backup_file}"
+}
+
+option_docker_images() {
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  run_docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}'
+}
+
+option_docker_disk_usage() {
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  run_docker system df
+}
+
+option_docker_prune_stopped() {
+  local confirm=""
+  prompt_read -p "确认清理所有已停止容器？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker container prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_images() {
+  local confirm=""
+  prompt_read -p "确认清理悬空镜像？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker image prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_build_cache() {
+  local confirm=""
+  prompt_read -p "确认清理 Docker 构建缓存？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker builder prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune() {
+  local confirm=""
+  prompt_read -p "确认清理未使用的容器、网络、悬空镜像和构建缓存（不删除数据卷）？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker system prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_all_images() {
+  local confirm=""
+  warn "此操作会删除所有未被容器使用的镜像，但不会删除数据卷。"
+  prompt_read -p "确认执行 docker system prune -a -f？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker system prune -a -f ;; *) warn "已取消。" ;; esac
+}
+
+normalize_domain_input() {
+  local domain="$1"
+  domain="$(printf '%s' "${domain}" | sed -E 's#^https?://##; s#/.*$##; s/[[:space:]]//g')"
+  domain="${domain%.}"
+  printf '%s' "${domain}"
+}
+
+is_valid_domain() {
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+}
+
+read_app_domain() {
+  local app_name="$1"
+  local result_var="$2"
+  local domain=""
+
+  prompt_read -p "请输入 ${app_name} 域名: " domain
+  domain="$(normalize_domain_input "${domain}")"
+
+  if ! is_valid_domain "${domain}"; then
+    err "域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  printf -v "${result_var}" '%s' "${domain}"
+}
+
+is_valid_port() {
+  local port="$1"
+  case "${port}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${port}" -ge 1 ] 2>/dev/null && [ "${port}" -le 65535 ] 2>/dev/null
+}
+
+sanitize_slug() {
+  local slug="$1"
+  slug="$(printf '%s' "${slug}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')"
+  slug="$(printf '%s' "${slug}" | sed -E 's/^-+//; s/-+$//; s/-+/-/g')"
+  printf '%s' "${slug:-app}"
+}
+
+run_web_gateway_register_proxy() {
+  local app_slug="$1"
+  local app_name="$2"
+  local domain="$3"
+  local upstream_host="$4"
+  local upstream_port="$5"
+  local result_file="${6:-}"
+  local root_cmd=""
+  local tmp_script=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能配置 Web 网关。"
+    return 1
+  fi
+
+  app_slug="$(sanitize_slug "${app_slug}")"
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+WEB_APP_SLUG="${1:?missing app slug}"
+WEB_APP_NAME="${2:?missing app name}"
+WEB_DOMAIN="${3:?missing domain}"
+WEB_UPSTREAM_HOST="${4:?missing upstream host}"
+WEB_UPSTREAM_PORT="${5:?missing upstream port}"
+WEB_RESULT_FILE="${6:-}"
+WEB_INTERNAL_HTTPS_PORT="8444"
+SINGBOX_REALITY_LOCAL_PORT="10443"
+SINGBOX_CONFIG="/etc/sing-box/config.json"
+ACME_WEBROOT="/var/www/mybox-acme"
+ACCESS_URL="http://${WEB_DOMAIN}"
+WEB_CERT_IS_TRUSTED=0
+APT_UPDATED=0
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+log_err() { printf '错误: %s\n' "$*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+apt_update_once() {
+  if [ "${APT_UPDATED}" -eq 0 ]; then
+    apt-get update
+    APT_UPDATED=1
+  fi
+}
+
+port_in_use() {
+  local port="$1"
+  if ! have_cmd ss; then
+    return 1
+  fi
+  ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .
+}
+
+port_owned_by() {
+  local port="$1"
+  local name="$2"
+  if ! have_cmd ss; then
+    return 1
+  fi
+  ss -H -ltnp "( sport = :${port} )" 2>/dev/null | grep -qi "${name}"
+}
+
+open_firewall_port() {
+  local port="$1"
+  local proto="${2:-tcp}"
+
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+  fi
+
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --add-port="${port}/${proto}" --permanent >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+safe_domain_name() {
+  printf '%s' "${WEB_DOMAIN}" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+install_gateway_dependencies() {
+  apt_update_once
+  apt-get install -y ca-certificates curl nginx python3 openssl
+}
+
+ensure_acme_webroot() {
+  mkdir -p "${ACME_WEBROOT}/.well-known/acme-challenge"
+  chmod 755 /var/www "${ACME_WEBROOT}" "${ACME_WEBROOT}/.well-known" "${ACME_WEBROOT}/.well-known/acme-challenge" 2>/dev/null || true
+}
+
+install_certbot_reload_hook() {
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/mybox-nginx-reload.sh <<'HOOKEOF'
+#!/usr/bin/env bash
+systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+HOOKEOF
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/mybox-nginx-reload.sh
+}
+
+use_letsencrypt_cert_if_present() {
+  local live_dir="/etc/letsencrypt/live/${WEB_DOMAIN}"
+
+  if [ -s "${live_dir}/fullchain.pem" ] && [ -s "${live_dir}/privkey.pem" ]; then
+    WEB_ORIGIN_CERT="${live_dir}/fullchain.pem"
+    WEB_ORIGIN_KEY="${live_dir}/privkey.pem"
+    WEB_CERT_IS_TRUSTED=1
+    install_certbot_reload_hook
+    return 0
+  fi
+
+  return 1
+}
+
+obtain_public_cert() {
+  ensure_acme_webroot
+  apt-get install -y certbot >/dev/null 2>&1 || return 1
+
+  if certbot certonly \
+    --webroot -w "${ACME_WEBROOT}" \
+    -d "${WEB_DOMAIN}" \
+    --cert-name "${WEB_DOMAIN}" \
+    --non-interactive \
+    --agree-tos \
+    --register-unsafely-without-email \
+    --keep-until-expiring; then
+    use_letsencrypt_cert_if_present
+    return $?
+  fi
+
+  return 1
+}
+
+ensure_origin_cert() {
+  local cert_dir="/etc/ssl/mybox-web"
+  local safe_domain=""
+
+  if use_letsencrypt_cert_if_present || obtain_public_cert; then
+    return 0
+  fi
+
+  log_warn "无法为 ${WEB_DOMAIN} 申请 Let's Encrypt 证书，将临时使用自签名证书；浏览器会提示不安全。请确认域名解析到本机且 80/tcp 可访问后重新运行安装。"
+
+  safe_domain="$(safe_domain_name)"
+  WEB_ORIGIN_CERT="${cert_dir}/${safe_domain}.crt"
+  WEB_ORIGIN_KEY="${cert_dir}/${safe_domain}.key"
+
+  if [ -s "${WEB_ORIGIN_CERT}" ] && [ -s "${WEB_ORIGIN_KEY}" ]; then
+    return 0
+  fi
+
+  mkdir -p "${cert_dir}"
+  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+    -keyout "${WEB_ORIGIN_KEY}" \
+    -out "${WEB_ORIGIN_CERT}" \
+    -subj "/CN=${WEB_DOMAIN}" \
+    -addext "subjectAltName=DNS:${WEB_DOMAIN}" >/dev/null 2>&1
+  chmod 600 "${WEB_ORIGIN_KEY}"
+}
+
+install_nginx_stream_module() {
+  if nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'; then
+    if [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+      apt_update_once
+      apt-get install -y libnginx-mod-stream
+    fi
+
+    if [ -f /usr/lib/nginx/modules/ngx_stream_module.so ] && \
+      ! grep -Rqs 'ngx_stream_module.so' /etc/nginx/modules-enabled 2>/dev/null; then
+      mkdir -p /etc/nginx/modules-enabled
+      printf '%s\n' 'load_module modules/ngx_stream_module.so;' > /etc/nginx/modules-enabled/50-mod-stream.conf
+    fi
+  fi
+}
+
+ensure_nginx_stream_include() {
+  local include_line="include /etc/nginx/stream.d/*.conf;"
+
+  mkdir -p /etc/nginx/stream.d
+  if grep -Fq "${include_line}" /etc/nginx/nginx.conf; then
+    return 0
+  fi
+
+  cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.mybox-web-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/etc/nginx/nginx.conf")
+text = path.read_text()
+include_line = "include /etc/nginx/stream.d/*.conf;"
+if include_line not in text:
+    marker = "\nhttp {"
+    if marker in text:
+        text = text.replace(marker, "\n" + include_line + "\n\nhttp {", 1)
+    else:
+        text = text.rstrip() + "\n" + include_line + "\n"
+    path.write_text(text)
+PY
+}
+
+move_singbox_reality_to_local() {
+  if [ ! -f "${SINGBOX_CONFIG}" ] || ! have_cmd sing-box; then
+    log_err "检测到 443 被 sing-box 占用，但未找到 sing-box 配置或命令，无法自动共用 443。"
+    exit 1
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && ! port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box; then
+    log_err "本机 ${SINGBOX_REALITY_LOCAL_PORT} 已被占用，无法迁移 sing-box REALITY。"
+    ss -ltnp "( sport = :${SINGBOX_REALITY_LOCAL_PORT} )" 2>/dev/null || true
+    exit 1
+  fi
+
+  cp "${SINGBOX_CONFIG}" "${SINGBOX_CONFIG}.mybox-web-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - "${SINGBOX_CONFIG}" "${SINGBOX_REALITY_LOCAL_PORT}" <<'PY'
+import json
+import sys
+
+path, local_port = sys.argv[1], int(sys.argv[2])
+with open(path, "r", encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+changed = False
+found = False
+for inbound in cfg.get("inbounds", []):
+    tls = inbound.get("tls") or {}
+    reality = tls.get("reality") or {}
+    if inbound.get("type") == "vless" and inbound.get("listen_port") == 443 and reality.get("enabled"):
+        inbound["listen"] = "127.0.0.1"
+        inbound["listen_port"] = local_port
+        changed = True
+        found = True
+    elif inbound.get("type") == "vless" and inbound.get("listen_port") == local_port and reality.get("enabled"):
+        found = True
+
+if not found:
+    raise SystemExit("未找到 listen_port=443 的 sing-box REALITY vless 入站")
+
+if changed:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+PY
+
+  sing-box check -c "${SINGBOX_CONFIG}"
+}
+
+should_use_singbox_stream_share() {
+  if port_in_use 443 && port_owned_by 443 sing-box; then
+    return 0
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box && \
+    [ -f /etc/nginx/stream.d/00-mybox-sni-router.conf ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+proxy_conf_file() {
+  printf '/etc/nginx/conf.d/00-mybox-web-%s.conf' "$(safe_domain_name)"
+}
+
+write_http_proxy_config() {
+  local conf_file=""
+
+  conf_file="$(proxy_conf_file)"
+  mkdir -p /etc/nginx/conf.d
+
+  cat > "${conf_file}" <<NGINXEOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${WEB_DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    location / {
+        proxy_pass http://${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXEOF
+}
+
+prepare_http_challenge_server() {
+  ensure_acme_webroot
+  nginx -t
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  open_firewall_port 80 tcp
+}
+
+append_internal_https_server() {
+  local conf_file=""
+
+  conf_file="$(proxy_conf_file)"
+  ensure_origin_cert
+
+  cat >> "${conf_file}" <<NGINXEOF
+
+server {
+    listen 127.0.0.1:${WEB_INTERNAL_HTTPS_PORT} ssl http2;
+    server_name ${WEB_DOMAIN};
+
+    ssl_certificate     ${WEB_ORIGIN_CERT};
+    ssl_certificate_key ${WEB_ORIGIN_KEY};
+
+    location / {
+        proxy_pass http://${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXEOF
+}
+
+write_stream_router() {
+  local safe_domain=""
+  local map_file=""
+  local migrated_map="/etc/nginx/stream-map.d/00-mybox-migrated.conf"
+
+  safe_domain="$(safe_domain_name)"
+  mkdir -p /etc/nginx/stream.d /etc/nginx/stream-map.d
+
+  if [ -f /etc/nginx/stream.d/00-mybox-sni-router.conf ]; then
+    awk '
+      $1 !~ /^(include|default)$/ && $2 ~ /^mybox_(komari|web)_https;$/ {
+        gsub(/;/, "", $1)
+        print $1 " mybox_web_https;"
+      }
+    ' /etc/nginx/stream.d/00-mybox-sni-router.conf | sort -u > "${migrated_map}.tmp" || true
+    if [ -s "${migrated_map}.tmp" ]; then
+      mv "${migrated_map}.tmp" "${migrated_map}"
+    else
+      rm -f "${migrated_map}.tmp"
+    fi
+  fi
+
+  map_file="/etc/nginx/stream-map.d/00-mybox-web-${safe_domain}.conf"
+  printf '%s %s;\n' "${WEB_DOMAIN}" "mybox_web_https" > "${map_file}"
+
+  cat > /etc/nginx/stream.d/00-mybox-sni-router.conf <<NGINXEOF
+stream {
+    map \$ssl_preread_server_name \$mybox_sni_backend {
+        include /etc/nginx/stream-map.d/*.conf;
+        default mybox_singbox_reality;
+    }
+
+    upstream mybox_singbox_reality {
+        server 127.0.0.1:${SINGBOX_REALITY_LOCAL_PORT};
+    }
+
+    upstream mybox_web_https {
+        server 127.0.0.1:${WEB_INTERNAL_HTTPS_PORT};
+    }
+
+    server {
+        listen 443;
+        listen [::]:443;
+        proxy_pass \$mybox_sni_backend;
+        ssl_preread on;
+    }
+}
+NGINXEOF
+}
+
+configure_stream_share() {
+  log "检测到 443 被 sing-box 占用，启用 Nginx stream SNI 分流。"
+  install_nginx_stream_module
+  ensure_nginx_stream_include
+  move_singbox_reality_to_local
+  if [ -f /etc/nginx/stream.d/00-mybox-sni-router.conf ]; then
+    systemctl restart sing-box
+  fi
+  prepare_http_challenge_server
+  append_internal_https_server
+  write_stream_router
+  nginx -t
+  systemctl restart sing-box
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl restart nginx
+  if [ "${WEB_CERT_IS_TRUSTED}" -eq 1 ]; then
+    ACCESS_URL="https://${WEB_DOMAIN}"
+  else
+    ACCESS_URL="http://${WEB_DOMAIN}"
+  fi
+  open_firewall_port 443 tcp
+}
+
+configure_direct_nginx() {
+  if ! nginx -t; then
+    log_err "Nginx 配置检测失败。"
+    exit 1
+  fi
+
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  open_firewall_port 80 tcp
+
+  if ! port_in_use 443 || port_owned_by 443 nginx; then
+    apt-get install -y certbot python3-certbot-nginx >/dev/null 2>&1 || true
+    if have_cmd certbot; then
+      if certbot --nginx -d "${WEB_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
+        ACCESS_URL="https://${WEB_DOMAIN}"
+        open_firewall_port 443 tcp
+      else
+        log_warn "证书申请失败，HTTP 反代仍可使用。"
+      fi
+    fi
+  elif port_in_use 443; then
+    log_warn "443 被非 Nginx/sing-box 服务占用，本次只启用 HTTP 反代。"
+    ss -ltnp "( sport = :443 )" 2>/dev/null || true
+  fi
+}
+
+register_proxy() {
+  if port_in_use 80 && ! port_owned_by 80 nginx; then
+    log_err "端口 80 已被非 Nginx 服务占用，无法共用 Nginx。"
+    ss -ltnp "( sport = :80 )" 2>/dev/null || true
+    exit 1
+  fi
+
+  install_gateway_dependencies
+  write_http_proxy_config
+
+  if should_use_singbox_stream_share; then
+    configure_stream_share
+  else
+    configure_direct_nginx
+  fi
+}
+
+write_result_file() {
+  [ -n "${WEB_RESULT_FILE}" ] || return 0
+  printf 'WEB_ACCESS_URL=%q\n' "${ACCESS_URL}" >> "${WEB_RESULT_FILE}"
+}
+
+register_proxy
+write_result_file
+
+log "Web 网关已注册: ${WEB_DOMAIN} -> ${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT}"
+log "访问地址: ${ACCESS_URL}"
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${app_slug}" "${app_name}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}" || rc=$?
+  else
+    bash "${tmp_script}" "${app_slug}" "${app_name}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+  return "${rc}"
+}
+
+register_shared_nginx_web_app() {
+  local app_slug="$1"
+  local app_name="$2"
+  local domain="$3"
+  local upstream_host="$4"
+  local upstream_port="$5"
+  local result_file="${6:-}"
+
+  domain="$(normalize_domain_input "${domain}")"
+  if ! is_valid_domain "${domain}"; then
+    err "${app_name} 域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  if ! is_valid_port "${upstream_port}"; then
+    err "${app_name} 本机端口无效: ${upstream_port}"
+    return 1
+  fi
+
+  run_web_gateway_register_proxy \
+    "${app_slug}" \
+    "${app_name}" \
+    "${domain}" \
+    "${upstream_host}" \
+    "${upstream_port}" \
+    "${result_file}"
+}
+
+run_web_gateway_unregister_proxy() {
+  local app_name="$1"
+  local domain="${2:-}"
+  local upstream_port="${3:-}"
+  local root_cmd=""
+  local tmp_script=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能注销 Web 网关。"
+    return 1
+  fi
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+WEB_APP_NAME="${1:?missing app name}"
+WEB_DOMAIN="${2:-}"
+WEB_UPSTREAM_PORT="${3:-}"
+DOMAINS=()
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+
+safe_domain_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+append_domain() {
+  local domain="$1"
+  local existing=""
+
+  [ -n "${domain}" ] || return 0
+  for existing in "${DOMAINS[@]}"; do
+    [ "${existing}" = "${domain}" ] && return 0
+  done
+  DOMAINS+=("${domain}")
+}
+
+discover_domains_by_port() {
+  local conf_file=""
+  local domain=""
+
+  [ -n "${WEB_UPSTREAM_PORT}" ] || return 0
+  shopt -s nullglob
+  for conf_file in /etc/nginx/conf.d/00-mybox-web-*.conf; do
+    if grep -Eq "proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost):${WEB_UPSTREAM_PORT}([[:space:];/]|$)" "${conf_file}"; then
+      while IFS= read -r domain; do
+        append_domain "${domain}"
+      done < <(
+        awk '
+          /^[[:space:]]*server_name[[:space:]]+/ {
+            for (i = 2; i <= NF; i++) {
+              gsub(/;/, "", $i)
+              if ($i != "_" && $i !~ /^\$/) print $i
+            }
+          }
+        ' "${conf_file}"
+      )
+    fi
+  done
+  shopt -u nullglob
+}
+
+remove_domain_from_migrated_map() {
+  local domain="$1"
+  local migrated_map="/etc/nginx/stream-map.d/00-mybox-migrated.conf"
+  local tmp_file=""
+
+  [ -f "${migrated_map}" ] || return 0
+  tmp_file="$(mktemp)"
+  awk -v domain="${domain}" '$1 != domain { print }' "${migrated_map}" > "${tmp_file}"
+  if cmp -s "${tmp_file}" "${migrated_map}"; then
+    rm -f "${tmp_file}"
+  else
+    mv "${tmp_file}" "${migrated_map}"
+  fi
+}
+
+remove_gateway_for_domain() {
+  local domain="$1"
+  local safe_domain=""
+
+  safe_domain="$(safe_domain_name "${domain}")"
+  rm -f "/etc/nginx/conf.d/00-mybox-web-${safe_domain}.conf"
+  rm -f "/etc/nginx/stream-map.d/00-mybox-web-${safe_domain}.conf"
+  rm -f "/etc/nginx/stream-map.d/00-mybox-komari-${safe_domain}.conf"
+  rm -f "/etc/ssl/mybox-web/${safe_domain}.crt" "/etc/ssl/mybox-web/${safe_domain}.key"
+  remove_domain_from_migrated_map "${domain}"
+  log "已移除 Web 网关配置: ${domain}"
+}
+
+reload_nginx_if_available() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    log_warn "当前系统没有 nginx 命令，已跳过 Nginx 重载。"
+    return 0
+  fi
+
+  if ! nginx -t; then
+    log_warn "Nginx 配置检测失败，未执行重载。请手动检查。"
+    return 1
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  else
+    nginx -s reload
+  fi
+}
+
+append_domain "${WEB_DOMAIN}"
+discover_domains_by_port
+
+if [ "${#DOMAINS[@]}" -eq 0 ]; then
+  log_warn "未找到 ${WEB_APP_NAME} 的 mybox Nginx 反代配置。"
+  exit 0
+fi
+
+for domain in "${DOMAINS[@]}"; do
+  remove_gateway_for_domain "${domain}"
+done
+reload_nginx_if_available
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${app_name}" "${domain}" "${upstream_port}" || rc=$?
+  else
+    bash "${tmp_script}" "${app_name}" "${domain}" "${upstream_port}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+  return "${rc}"
+}
+
+unregister_shared_nginx_web_app() {
+  local app_name="$1"
+  local domain="${2:-}"
+  local upstream_port="${3:-}"
+
+  domain="$(normalize_domain_input "${domain}")"
+  if [ -n "${domain}" ] && ! is_valid_domain "${domain}"; then
+    err "${app_name} 域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  if [ -n "${upstream_port}" ] && ! is_valid_port "${upstream_port}"; then
+    err "${app_name} 本机端口无效: ${upstream_port}"
+    return 1
+  fi
+
+  run_web_gateway_unregister_proxy "${app_name}" "${domain}" "${upstream_port}"
+}
+
+option_install_komari_server() {
+  local root_cmd=""
+  local tmp_script=""
+  local result_file=""
+  local komari_domain=""
+  local komari_access_url=""
+  local komari_initial_password=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能安装 Komari。"
+    return 1
+  fi
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        err "Komari 原生安装当前只支持 Debian / Ubuntu。"
+        return 1
+        ;;
+    esac
+  else
+    err "无法识别系统版本，已取消。"
+    return 1
+  fi
+
+  if ! read_app_domain "Komari" komari_domain; then
+    return 1
+  fi
+
+  say "即将安装 Komari 服务器监控："
+  say "- 安装方式: 官方原生二进制 + systemd"
+  say "- 监听地址: 127.0.0.1:25774"
+  say "- 反代方式: 共享宿主机 Nginx"
+  say "- 安装目录: /opt/komari"
+
+  tmp_script="$(mktemp)"
+  result_file="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+KOMARI_DOMAIN="${1:?missing domain}"
+KOMARI_RESULT_FILE="${2:-}"
+INSTALL_DIR="/opt/komari"
+DATA_DIR="/opt/komari"
+SERVICE_NAME="komari"
+BINARY_PATH="${INSTALL_DIR}/komari"
+LISTEN_HOST="127.0.0.1"
+LISTEN_PORT="25774"
+KOMARI_ADMIN_USERNAME="facker668"
+KOMARI_ADMIN_PASSWORD="wohenshuai"
+ACCESS_URL="http://${KOMARI_DOMAIN}"
+INITIAL_PASSWORD=""
+APT_UPDATED=0
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+log_err() { printf '错误: %s\n' "$*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+apt_update_once() {
+  if [ "${APT_UPDATED}" -eq 0 ]; then
+    apt-get update
+    APT_UPDATED=1
+  fi
+}
+
+detect_arch() {
+  local arch=""
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    i386|i686) printf '386' ;;
+    riscv64) printf 'riscv64' ;;
+    *)
+      log_err "不支持的架构: ${arch}"
+      exit 1
+      ;;
+  esac
+}
+
+cleanup_legacy_docker_komari() {
+  if have_cmd docker && docker info >/dev/null 2>&1; then
+    docker rm -f komari-caddy komari >/dev/null 2>&1 || true
+  fi
+}
+
+install_dependencies() {
+  apt_update_once
+  apt-get install -y ca-certificates curl python3
+}
+
+install_komari_binary() {
+  local arch=""
+  local file_name=""
+  local download_url=""
+  local tmp_binary=""
+
+  arch="$(detect_arch)"
+  file_name="komari-linux-${arch}"
+  download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+  tmp_binary="$(mktemp)"
+
+  log "下载 Komari 官方原生二进制: ${download_url}"
+  if ! curl -fsSL -o "${tmp_binary}" "${download_url}"; then
+    rm -f "${tmp_binary}"
+    log_err "下载 Komari 二进制失败。"
+    exit 1
+  fi
+
+  mkdir -p "${INSTALL_DIR}" "${DATA_DIR}"
+  if [ -f "${BINARY_PATH}" ]; then
+    cp "${BINARY_PATH}" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)" || true
+  fi
+
+  install -m 0755 "${tmp_binary}" "${BINARY_PATH}"
+  rm -f "${tmp_binary}"
+}
+
+write_komari_service() {
+  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<SERVICEEOF
+[Unit]
+Description=Komari Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${BINARY_PATH} server -l ${LISTEN_HOST}:${LISTEN_PORT}
+WorkingDirectory=${DATA_DIR}
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+  systemctl daemon-reload
+  systemctl enable --now "${SERVICE_NAME}.service"
+  sleep 5
+
+  if ! systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    log_err "Komari 服务启动失败，查看日志: journalctl -u ${SERVICE_NAME} -f"
+    exit 1
+  fi
+
+  INITIAL_PASSWORD="$(journalctl -u "${SERVICE_NAME}" --since "2 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' || true)"
+}
+
+set_komari_admin_credentials() {
+  if [ -z "${KOMARI_ADMIN_PASSWORD}" ]; then
+    return 0
+  fi
+
+  if (cd "${DATA_DIR}" && "${BINARY_PATH}" chpasswd -p "${KOMARI_ADMIN_PASSWORD}"); then
+    INITIAL_PASSWORD="Username: admin , Password: ${KOMARI_ADMIN_PASSWORD}"
+  else
+    log_warn "Komari 管理员密码设置失败，保留官方初始密码。"
+    return 0
+  fi
+
+  if have_cmd python3; then
+    if python3 - "${DATA_DIR}/data/komari.db" "${KOMARI_ADMIN_USERNAME}" <<'PY'
+import sqlite3
+import sys
+
+db_path, username = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db_path)
+try:
+    cur = con.cursor()
+    cur.execute("SELECT uuid, username FROM users ORDER BY created_at ASC LIMIT 1")
+    row = cur.fetchone()
+    if row and row[1] != username:
+        cur.execute("UPDATE users SET username = ?, updated_at = datetime('now') WHERE uuid = ?", (username, row[0]))
+        con.commit()
+finally:
+    con.close()
+PY
+    then
+      INITIAL_PASSWORD="Username: ${KOMARI_ADMIN_USERNAME} , Password: ${KOMARI_ADMIN_PASSWORD}"
+    else
+      log_warn "Komari 管理员用户名设置失败，用户名保持 admin。"
+    fi
+  fi
+
+  (cd "${DATA_DIR}" && "${BINARY_PATH}" permit-login) >/dev/null 2>&1 || true
+  systemctl restart "${SERVICE_NAME}.service"
+}
+
+install_update_timer() {
+  cat > /usr/local/sbin/mybox-komari-update <<'UPDATEEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="/opt/komari"
+BINARY_PATH="${INSTALL_DIR}/komari"
+SERVICE_NAME="komari"
+
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    i386|i686) printf '386' ;;
+    riscv64) printf 'riscv64' ;;
+    *) log "不支持的架构: $(uname -m)"; exit 0 ;;
+  esac
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+  log "缺少 curl，跳过 Komari 更新。"
+  exit 0
+fi
+
+arch="$(detect_arch)"
+download_url="https://github.com/komari-monitor/komari/releases/latest/download/komari-linux-${arch}"
+tmp_binary="$(mktemp)"
+
+if ! curl -fsSL -o "${tmp_binary}" "${download_url}"; then
+  rm -f "${tmp_binary}"
+  log "下载 Komari 最新版本失败，保留当前版本。"
+  exit 0
+fi
+
+if [ -f "${BINARY_PATH}" ] && cmp -s "${tmp_binary}" "${BINARY_PATH}"; then
+  rm -f "${tmp_binary}"
+  log "Komari 已是最新版本。"
+  exit 0
+fi
+
+mkdir -p "${INSTALL_DIR}"
+if [ -f "${BINARY_PATH}" ]; then
+  cp "${BINARY_PATH}" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)" || true
+fi
+
+systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+install -m 0755 "${tmp_binary}" "${BINARY_PATH}"
+rm -f "${tmp_binary}"
+
+if systemctl start "${SERVICE_NAME}.service" && systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+  log "Komari 已更新并重启。"
+  exit 0
+fi
+
+log "Komari 更新后启动失败，请检查: journalctl -u ${SERVICE_NAME} -f"
+exit 1
+UPDATEEOF
+
+  chmod +x /usr/local/sbin/mybox-komari-update
+
+  cat > /etc/systemd/system/mybox-komari-update.service <<'SERVICEEOF'
+[Unit]
+Description=mybox Komari native binary update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mybox-komari-update
+SERVICEEOF
+
+  cat > /etc/systemd/system/mybox-komari-update.timer <<'TIMEREOF'
+[Unit]
+Description=Run mybox Komari update weekly
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+  systemctl daemon-reload
+  systemctl enable --now mybox-komari-update.timer >/dev/null 2>&1 || true
+}
+
+write_result_file() {
+  [ -n "${KOMARI_RESULT_FILE}" ] || return 0
+  {
+    printf 'KOMARI_ACCESS_URL=%q\n' "${ACCESS_URL}"
+    printf 'KOMARI_INITIAL_PASSWORD=%q\n' "${INITIAL_PASSWORD}"
+  } > "${KOMARI_RESULT_FILE}"
+}
+
+if [ ! -d /run/systemd/system ]; then
+  log_err "当前环境未运行 systemd，无法使用 Komari 官方原生服务安装。"
+  exit 1
+fi
+
+install_dependencies
+cleanup_legacy_docker_komari
+install_komari_binary
+write_komari_service
+set_komari_admin_credentials
+install_update_timer
+write_result_file
+
+log "Komari 原生服务状态："
+systemctl --no-pager --full status komari.service | sed -n '1,8p' || true
+log "访问地址: ${ACCESS_URL}"
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${komari_domain}" "${result_file}" || rc=$?
+  else
+    bash "${tmp_script}" "${komari_domain}" "${result_file}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+
+  if [ "${rc}" -ne 0 ]; then
+    rm -f "${result_file}"
+    err "Komari 安装失败。"
+    return "${rc}"
+  fi
+
+  if ! register_shared_nginx_web_app "komari" "Komari" "${komari_domain}" "127.0.0.1" "25774" "${result_file}"; then
+    rm -f "${result_file}"
+    err "Komari 已安装，但 Web 网关反代配置失败。"
+    return 1
+  fi
+
+  if [ -r "${result_file}" ]; then
+    # shellcheck disable=SC1090
+    . "${result_file}"
+    komari_access_url="${WEB_ACCESS_URL:-${KOMARI_ACCESS_URL:-}}"
+    komari_initial_password="${KOMARI_INITIAL_PASSWORD:-}"
+  fi
+  rm -f "${result_file}"
+
+  print_divider
+  ok "Komari 安装完成。"
+  printf '%s访问地址:%s %s%s%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${komari_access_url:-http://${komari_domain}}" "${C_RESET}"
+  if [ -n "${komari_initial_password}" ]; then
+    printf '%s初始登录信息（仅显示一次）:%s %s%s%s\n' "${C_BOLD}" "${C_RESET}" "${C_YELLOW}" "${komari_initial_password}" "${C_RESET}"
+  else
+    warn "未获取到初始密码；如果是重装并保留数据，这是正常的。可查看: journalctl -u komari -n 80"
+  fi
+  printf '%s服务管理:%s %ssystemctl status komari%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+  printf '%s每周自动升级:%s %ssystemctl list-timers mybox-komari-update.timer%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+  print_divider
+}
+
+option_upgrade_komari_server() {
+  local root_cmd=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能升级 Komari。"
+    return 1
+  fi
+
+  if [ ! -x /opt/komari/komari ]; then
+    err "未发现已安装的 Komari，请先选择“安装 / 重装 Komari”。"
+    return 1
+  fi
+
+  if [ ! -x /usr/local/sbin/mybox-komari-update ]; then
+    err "当前 Komari 没有 mybox 更新组件，请先选择“安装 / 重装 Komari”补齐更新任务。"
+    return 1
+  fi
+
+  say "正在检查 Komari 最新版本..."
+  if [ -n "${root_cmd}" ]; then
+    "${root_cmd}" /usr/local/sbin/mybox-komari-update || rc=$?
+  else
+    /usr/local/sbin/mybox-komari-update || rc=$?
+  fi
+
+  if [ "${rc}" -eq 0 ]; then
+    ok "Komari 升级检查完成。"
+  else
+    err "Komari 升级失败，请检查: journalctl -u komari -n 80 --no-pager"
+  fi
+  return "${rc}"
+}
+
+option_uninstall_komari_server() {
+  local root_cmd=""
+  local tmp_script=""
+  local komari_domain=""
+  local confirm=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能卸载 Komari。"
+    return 1
+  fi
+
+  prompt_read -p "请输入 Komari 域名（留空自动查找 25774 反代）: " komari_domain
+  komari_domain="$(normalize_domain_input "${komari_domain}")"
+  if [ -n "${komari_domain}" ] && ! is_valid_domain "${komari_domain}"; then
+    err "Komari 域名格式无效。示例: komari.example.com"
+    return 1
+  fi
+
+  warn "即将卸载 Komari："
+  say "- 停止并删除 komari.service"
+  say "- 删除每周自动升级 mybox-komari-update.timer"
+  say "- 删除 /opt/komari（包含 Komari 数据）"
+  if [ -n "${komari_domain}" ]; then
+    say "- 删除 ${komari_domain} 的 mybox Nginx 反代配置"
+  else
+    say "- 自动查找并删除指向 127.0.0.1:25774 的 mybox Nginx 反代配置"
+  fi
+  prompt_read -p "确认卸载 Komari？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+
+if [ -d /run/systemd/system ]; then
+  systemctl disable --now komari.service >/dev/null 2>&1 || true
+  systemctl disable --now mybox-komari-update.timer >/dev/null 2>&1 || true
+  systemctl stop mybox-komari-update.service >/dev/null 2>&1 || true
+else
+  log_warn "当前环境未运行 systemd，已跳过 systemd 停止步骤。"
+fi
+
+rm -f /etc/systemd/system/komari.service
+rm -f /etc/systemd/system/mybox-komari-update.service
+rm -f /etc/systemd/system/mybox-komari-update.timer
+rm -f /usr/local/sbin/mybox-komari-update
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker rm -f komari-caddy komari >/dev/null 2>&1 || true
+fi
+
+rm -rf /opt/komari
+log "Komari 服务、更新任务和 /opt/komari 已移除。"
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" || rc=$?
+  else
+    bash "${tmp_script}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+
+  if [ "${rc}" -ne 0 ]; then
+    err "Komari 卸载失败。"
+    return "${rc}"
+  fi
+
+  if ! unregister_shared_nginx_web_app "Komari" "${komari_domain}" "25774"; then
+    warn "Komari 已卸载，但 Web 网关清理可能未完成。请检查 /etc/nginx/conf.d 和 /etc/nginx/stream-map.d。"
+    return 1
+  fi
+
+  print_divider
+  ok "Komari 卸载完成。"
+  print_divider
+}
+
+realm_release_target() {
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) printf 'x86_64-unknown-linux-musl' ;;
+    aarch64|arm64) printf 'aarch64-unknown-linux-musl' ;;
+    armv7l|armv7) printf 'armv7-unknown-linux-musleabihf' ;;
+    armv6l|arm) printf 'arm-unknown-linux-musleabihf' ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_realm_host() {
+  local host="$1"
+  case "${host}" in
+    \[*\]) host="${host#\[}"; host="${host%\]}" ;;
+  esac
+  printf '%s' "${host}"
+}
+
+is_valid_realm_host() {
+  local host=""
+  host="$(normalize_realm_host "$1")"
+  [ -n "${host}" ] || return 1
+  printf '%s' "${host}" | grep -Eq '^[A-Za-z0-9._:%-]+$'
+}
+
+is_valid_realm_listen_host() {
+  local host=""
+  host="$(normalize_realm_host "$1")"
+  printf '%s' "${host}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f:]+(%[A-Za-z0-9_.-]+)?$'
+}
+
+is_valid_realm_rule_name() {
+  [ -n "$1" ] && printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]+$'
+}
+
+format_realm_address() {
+  local host=""
+  local port="$2"
+  host="$(normalize_realm_host "$1")"
+  case "${host}" in
+    *:*) printf '[%s]:%s' "${host}" "${port}" ;;
+    *) printf '%s:%s' "${host}" "${port}" ;;
+  esac
+}
+
+realm_protocol_label() {
+  case "$1" in
+    tcp) printf 'TCP' ;;
+    udp) printf 'UDP' ;;
+    both) printf 'TCP+UDP' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+realm_rules_record_count() {
+  local rules_file="${1:-${REALM_RULES_FILE}}"
+  [ -r "${rules_file}" ] || { printf '0'; return 0; }
+  awk -F '\t' 'NF >= 7 && $1 !~ /^#/ {n++} END {print n+0}' "${rules_file}"
+}
+
+realm_enabled_rule_count() {
+  local rules_file="${1:-${REALM_RULES_FILE}}"
+  [ -r "${rules_file}" ] || { printf '0'; return 0; }
+  awk -F '\t' 'NF >= 7 && $1 !~ /^#/ && $2 == "1" {n++} END {print n+0}' "${rules_file}"
+}
+
+realm_build_config() {
+  local rules_file="$1"
+  local output_file="$2"
+  local name=""
+  local enabled=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol=""
+  local listen_address=""
+  local remote_address=""
+  local no_tcp="false"
+  local use_udp="false"
+
+  cat > "${output_file}" <<'EOF'
+# Managed by mybox
+[log]
+level = "warn"
+output = "stdout"
+
+[network]
+no_tcp = false
+use_udp = true
+tcp_timeout = 5
+udp_timeout = 30
+EOF
+
+  [ -r "${rules_file}" ] || return 0
+
+  while IFS=$'\t' read -r name enabled listen_host listen_port remote_host remote_port protocol; do
+    [ -n "${name}" ] || continue
+    case "${name}" in \#*) continue ;; esac
+    [ "${enabled}" = "1" ] || continue
+
+    listen_address="$(format_realm_address "${listen_host}" "${listen_port}")"
+    remote_address="$(format_realm_address "${remote_host}" "${remote_port}")"
+    case "${protocol}" in
+      tcp) no_tcp="false"; use_udp="false" ;;
+      udp) no_tcp="true"; use_udp="true" ;;
+      both) no_tcp="false"; use_udp="true" ;;
+      *) continue ;;
+    esac
+
+    cat >> "${output_file}" <<EOF
+
+# mybox rule: ${name}
+[[endpoints]]
+listen = "${listen_address}"
+remote = "${remote_address}"
+
+[endpoints.network]
+no_tcp = ${no_tcp}
+use_udp = ${use_udp}
+EOF
+  done < "${rules_file}"
+}
+
+realm_write_service_file() {
+  local output_file="$1"
+  cat > "${output_file}" <<EOF
+# Managed by mybox
+[Unit]
+Description=Realm Port Forwarding managed by mybox
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${REALM_BIN} -c ${REALM_CONFIG}
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+realm_is_managed_install() {
+  [ -f "${REALM_SERVICE}" ] && grep -Fqs '# Managed by mybox' "${REALM_SERVICE}"
+}
+
+realm_restore_previous_files() {
+  local had_rules="$1"
+  local old_rules="$2"
+  local had_config="$3"
+  local old_config="$4"
+
+  if [ "${had_rules}" = "1" ]; then
+    run_root install -m 0644 "${old_rules}" "${REALM_RULES_FILE}" || true
+  else
+    run_root rm -f "${REALM_RULES_FILE}" || true
+  fi
+  if [ "${had_config}" = "1" ]; then
+    run_root install -m 0644 "${old_config}" "${REALM_CONFIG}" || true
+  else
+    run_root rm -f "${REALM_CONFIG}" || true
+  fi
+
+  if [ "$(realm_enabled_rule_count "${old_rules}")" -gt 0 ]; then
+    run_root systemctl enable realm >/dev/null 2>&1 || true
+    run_root systemctl restart realm >/dev/null 2>&1 || true
+  else
+    run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  fi
+}
+
+realm_apply_rules_file() {
+  local new_rules="$1"
+  local tmp_config=""
+  local old_rules=""
+  local old_config=""
+  local had_rules=0
+  local had_config=0
+  local enabled_count=0
+  local write_failed=0
+
+  if [ ! -x "${REALM_BIN}" ] || [ ! -f "${REALM_SERVICE}" ]; then
+    err "Realm 尚未安装，请先选择安装 / 更新 Realm。"
+    return 1
+  fi
+
+  tmp_config="$(mktemp)"
+  old_rules="$(mktemp)"
+  old_config="$(mktemp)"
+  if [ -f "${REALM_RULES_FILE}" ]; then
+    cp "${REALM_RULES_FILE}" "${old_rules}"
+    had_rules=1
+  fi
+  if [ -f "${REALM_CONFIG}" ]; then
+    cp "${REALM_CONFIG}" "${old_config}"
+    had_config=1
+  fi
+
+  realm_build_config "${new_rules}" "${tmp_config}"
+  if ! run_root install -d -m 0755 "${REALM_DIR}"; then
+    write_failed=1
+  elif [ "${new_rules}" != "${REALM_RULES_FILE}" ] \
+    && ! run_root install -m 0644 "${new_rules}" "${REALM_RULES_FILE}"; then
+    write_failed=1
+  elif ! run_root install -m 0644 "${tmp_config}" "${REALM_CONFIG}"; then
+    write_failed=1
+  elif ! run_root systemctl daemon-reload; then
+    write_failed=1
+  fi
+
+  if [ "${write_failed}" -ne 0 ]; then
+    err "写入 Realm 配置失败。"
+    realm_restore_previous_files "${had_rules}" "${old_rules}" "${had_config}" "${old_config}"
+    rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+    return 1
+  fi
+
+  enabled_count="$(realm_enabled_rule_count "${new_rules}")"
+  if [ "${enabled_count}" -gt 0 ]; then
+    if ! run_root systemctl enable realm >/dev/null 2>&1 \
+      || ! run_root systemctl restart realm; then
+      err "Realm 启动失败，已回滚到修改前的配置。"
+      run_root journalctl -u realm -n 30 --no-pager 2>/dev/null || true
+      realm_restore_previous_files "${had_rules}" "${old_rules}" "${had_config}" "${old_config}"
+      rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+      return 1
+    fi
+  else
+    run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+}
+
+realm_open_active_firewall_port() {
+  local port="$1"
+  local protocol="$2"
+  local proto=""
+
+  case "${protocol}" in
+    tcp) proto="tcp" ;;
+    udp) proto="udp" ;;
+    both)
+      realm_open_active_firewall_port "${port}" tcp
+      realm_open_active_firewall_port "${port}" udp
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    run_root ufw allow "${port}/${proto}" >/dev/null
+    ok "已放行 UFW 端口 ${port}/${proto}"
+    return 0
+  fi
+
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    run_root firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null
+    run_root firewall-cmd --reload >/dev/null
+    ok "已放行 firewalld 端口 ${port}/${proto}"
+    return 0
+  fi
+
+  warn "未检测到已启用的 UFW / firewalld，请确认云防火墙和系统防火墙已放行 ${port}/${proto}。"
+}
+
+realm_rules_conflict() {
+  local rules_file="$1"
+  local listen_host="$2"
+  local listen_port="$3"
+  local protocol="$4"
+  local ignore_name="${5:-}"
+
+  [ -r "${rules_file}" ] || return 1
+  awk -F '\t' -v host="${listen_host}" -v port="${listen_port}" -v proto="${protocol}" -v ignore="${ignore_name}" '
+    function overlaps(a, b) { return a == "both" || b == "both" || a == b }
+    NF >= 7 && $1 !~ /^#/ && $1 != ignore && $3 == host && $4 == port && overlaps($7, proto) { found=1 }
+    END { exit found ? 0 : 1 }
+  ' "${rules_file}"
+}
+
+realm_download_asset() {
+  local asset="$1"
+  local output="$2"
+  local url=""
+  local custom_url="${REALM_DOWNLOAD_URL:-}"
+  local -a urls=()
+  if [ -n "${custom_url}" ]; then
+    custom_url="${custom_url//\{asset\}/${asset}}"
+    urls+=("${custom_url}")
+  fi
+  # The official URL is tried first. The proxy URLs are only fallbacks for
+  # IPv6-only hosts whose provider cannot reach GitHub over IPv6.
+  urls+=(
+    "https://github.com/zhboner/realm/releases/latest/download/${asset}"
+    "https://ghproxy.net/https://github.com/zhboner/realm/releases/latest/download/${asset}"
+    "https://gh-proxy.com/https://github.com/zhboner/realm/releases/latest/download/${asset}"
+  )
+  for url in "${urls[@]}"; do
+    say "尝试下载 Realm: ${url}"
+    rm -f "${output}"
+    if have_cmd curl; then
+      if curl -fL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 180 \
+        -H "Cache-Control: no-cache" -H "jshook: $(get_effective_jshook)" \
+        "${url}" -o "${output}" \
+        && tar -tzf "${output}" >/dev/null 2>&1; then
+        return 0
+      fi
+    elif have_cmd wget; then
+      if wget --tries=2 --timeout=20 -O "${output}" \
+        --header="Cache-Control: no-cache" --header="jshook: $(get_effective_jshook)" \
+        "${url}" \
+        && tar -tzf "${output}" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    warn "下载源不可用或返回内容不是有效的 tar.gz，继续尝试下一个源。"
+  done
+  return 1
+}
+
+option_install_realm() {
+  local target=""
+  local asset=""
+  local tmp_dir=""
+  local tmp_rules=""
+  local tmp_service=""
+  local download_ok=0
+
+  if [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+    err "Realm 安装仅支持 Linux。"
+    return 1
+  fi
+  if ! have_cmd systemctl; then
+    err "当前系统没有 systemd/systemctl，暂不支持自动管理 Realm。"
+    return 1
+  fi
+  if [ -e "${REALM_SERVICE}" ] && ! realm_is_managed_install; then
+    err "检测到非 mybox 管理的 ${REALM_SERVICE}，为避免覆盖已停止安装。"
+    return 1
+  fi
+  if [ -e "${REALM_BIN}" ] && [ ! -e "${REALM_SERVICE}" ] && [ ! -e "${REALM_RULES_FILE}" ]; then
+    err "检测到已有 ${REALM_BIN}，但没有 mybox 管理标记，未自动接管。"
+    return 1
+  fi
+
+  if ! target="$(realm_release_target)"; then
+    err "Realm 暂不支持当前架构: $(uname -m 2>/dev/null)"
+    return 1
+  fi
+
+  if ! have_cmd tar || { ! have_cmd curl && ! have_cmd wget; }; then
+    if ! have_cmd apt-get; then
+      err "缺少 tar/curl/wget，且当前系统没有 apt-get。"
+      return 1
+    fi
+    say "正在安装 Realm 下载依赖..."
+    if ! run_root apt-get update \
+      || ! run_root apt-get install -y ca-certificates curl tar; then
+      err "Realm 下载依赖安装失败。"
+      return 1
+    fi
+  fi
+
+  asset="realm-${target}.tar.gz"
+  tmp_dir="$(mktemp -d)"
+  say "正在下载 Realm 最新版本 (${target})..."
+  if realm_download_asset "${asset}" "${tmp_dir}/${asset}"; then
+    download_ok=1
+  fi
+  if [ -n "${REALM_SHA256:-}" ]; then
+    if ! printf '%s  %s\n' "${REALM_SHA256}" "${tmp_dir}/${asset}" | sha256sum -c -; then
+      rm -rf "${tmp_dir}"
+      err "Realm SHA-256 校验失败，已拒绝安装。请检查 REALM_SHA256。"
+      return 1
+    fi
+    ok "Realm 下载包 SHA-256 校验通过。"
+  else
+    warn "未设置 REALM_SHA256；已完成 tar.gz 格式和二进制可执行性检查。"
+  fi
+
+  if [ "${download_ok}" -ne 1 ] \
+    || ! tar -xzf "${tmp_dir}/${asset}" -C "${tmp_dir}" \
+    || [ ! -s "${tmp_dir}/realm" ]; then
+    rm -rf "${tmp_dir}"
+    err "Realm 下载或解压失败。"
+    return 1
+  fi
+  chmod +x "${tmp_dir}/realm"
+  if ! "${tmp_dir}/realm" --version >/dev/null 2>&1; then
+    rm -rf "${tmp_dir}"
+    err "下载的 Realm 二进制无法运行。"
+    return 1
+  fi
+
+  tmp_service="${tmp_dir}/realm.service"
+  realm_write_service_file "${tmp_service}"
+  if ! run_root install -d -m 0755 "${REALM_DIR}" \
+    || ! run_root install -m 0755 "${tmp_dir}/realm" "${REALM_BIN}" \
+    || ! run_root install -m 0644 "${tmp_service}" "${REALM_SERVICE}"; then
+    rm -rf "${tmp_dir}"
+    err "Realm 二进制或 systemd 服务安装失败。"
+    return 1
+  fi
+
+  if [ ! -f "${REALM_RULES_FILE}" ]; then
+    tmp_rules="${tmp_dir}/mybox-rules.tsv"
+    printf '# name\tenabled\tlisten_host\tlisten_port\tremote_host\tremote_port\tprotocol\n' > "${tmp_rules}"
+    if ! run_root install -m 0644 "${tmp_rules}" "${REALM_RULES_FILE}"; then
+      rm -rf "${tmp_dir}"
+      err "Realm 规则文件初始化失败。"
+      return 1
+    fi
+  fi
+
+  if ! realm_apply_rules_file "${REALM_RULES_FILE}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  print_divider
+  ok "Realm 安装 / 更新完成。"
+  "${REALM_BIN}" --version 2>/dev/null || true
+  say "规则文件: ${REALM_RULES_FILE}"
+  say "配置文件: ${REALM_CONFIG}"
+  print_divider
+  rm -rf "${tmp_dir}"
+}
+
+realm_ensure_installed() {
+  if [ -x "${REALM_BIN}" ] && realm_is_managed_install; then
+    return 0
+  fi
+  warn "尚未安装 mybox 管理的 Realm，正在先执行安装。"
+  option_install_realm
+}
+
+option_add_realm_rule() {
+  local name=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol_choice=""
+  local protocol=""
+  local tmp_rules=""
+
+  realm_ensure_installed || return 1
+  prompt_read -p "规则名称（字母/数字/._-）: " name
+  if ! is_valid_realm_rule_name "${name}"; then
+    err "规则名称无效，只允许字母、数字、点、下划线和短横线。"
+    return 1
+  fi
+  if awk -F '\t' -v name="${name}" 'NF >= 7 && $1 == name {found=1} END {exit found ? 0 : 1}' "${REALM_RULES_FILE}"; then
+    err "规则名称 ${name} 已存在。"
+    return 1
+  fi
+
+  prompt_read -p "监听 IP [0.0.0.0]: " listen_host
+  listen_host="$(normalize_realm_host "${listen_host:-0.0.0.0}")"
+  if ! is_valid_realm_listen_host "${listen_host}"; then
+    err "监听 IP 格式无效。示例: 0.0.0.0 或 ::"
+    return 1
+  fi
+  prompt_read -p "监听端口: " listen_port
+  if ! is_valid_port "${listen_port}"; then
+    err "监听端口必须是 1-65535。"
+    return 1
+  fi
+  prompt_read -p "目标 IP 或域名: " remote_host
+  remote_host="$(normalize_realm_host "${remote_host}")"
+  if ! is_valid_realm_host "${remote_host}"; then
+    err "目标 IP 或域名格式无效。"
+    return 1
+  fi
+  prompt_read -p "目标端口: " remote_port
+  if ! is_valid_port "${remote_port}"; then
+    err "目标端口必须是 1-65535。"
+    return 1
+  fi
+  prompt_read -p "协议 [1=TCP, 2=UDP, 3=TCP+UDP，默认 3]: " protocol_choice
+  case "${protocol_choice:-3}" in
+    1|tcp|TCP) protocol="tcp" ;;
+    2|udp|UDP) protocol="udp" ;;
+    3|both|BOTH) protocol="both" ;;
+    *) err "协议选择无效。"; return 1 ;;
+  esac
+
+  if realm_rules_conflict "${REALM_RULES_FILE}" "${listen_host}" "${listen_port}" "${protocol}"; then
+    err "监听地址 ${listen_host}:${listen_port} 与现有规则协议冲突。"
+    return 1
+  fi
+
+  tmp_rules="$(mktemp)"
+  cp "${REALM_RULES_FILE}" "${tmp_rules}"
+  printf '%s\t1\t%s\t%s\t%s\t%s\t%s\n' \
+    "${name}" "${listen_host}" "${listen_port}" "${remote_host}" "${remote_port}" "${protocol}" >> "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+
+  case "${listen_host}" in
+    127.*|::1) ;;
+    *) realm_open_active_firewall_port "${listen_port}" "${protocol}" || true ;;
+  esac
+  ok "已添加并启用 Realm 规则 ${name}: $(format_realm_address "${listen_host}" "${listen_port}") -> $(format_realm_address "${remote_host}" "${remote_port}") ($(realm_protocol_label "${protocol}"))"
+}
+
+option_list_realm_rules() {
+  local count=0
+  local index=0
+  local name=""
+  local enabled=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol=""
+  local state=""
+  count="$(realm_rules_record_count)"
+  say "${C_BOLD}${C_CYAN}Realm 转发规则${C_RESET}"
+  print_divider
+  if [ "${count}" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  while IFS=$'\t' read -r name enabled listen_host listen_port remote_host remote_port protocol; do
+    [ -n "${name}" ] || continue
+    case "${name}" in \#*) continue ;; esac
+    index=$((index + 1))
+    if [ "${enabled}" = "1" ]; then state="启用"; else state="停用"; fi
+    printf '[%d] %s  [%s]  [%s]\n' "${index}" "${name}" "${state}" "$(realm_protocol_label "${protocol}")"
+    say "    监听: $(format_realm_address "${listen_host}" "${listen_port}")"
+    say "    目标: $(format_realm_address "${remote_host}" "${remote_port}")"
+    [ "${index}" -ge "${count}" ] || printf '\n'
+  done < "${REALM_RULES_FILE}"
+  print_divider
+}
+
+realm_resolve_rule_name() {
+  local selector="$1"
+  if printf '%s' "${selector}" | grep -Eq '^[0-9]+$'; then
+    awk -F '\t' -v wanted="${selector}" 'NF >= 7 && $1 !~ /^#/ {n++; if (n == wanted) {print $1; exit}}' "${REALM_RULES_FILE}"
+  else
+    awk -F '\t' -v wanted="${selector}" 'NF >= 7 && $1 == wanted {print $1; exit}' "${REALM_RULES_FILE}"
+  fi
+}
+
+option_toggle_realm_rule() {
+  local selector=""
+  local name=""
+  local current=""
+  local next=""
+  local tmp_rules=""
+  local listen_port=""
+  local listen_host=""
+  local protocol=""
+
+  if [ "$(realm_rules_record_count)" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  option_list_realm_rules
+  prompt_read -p "请输入要启用 / 停用的规则序号或名称: " selector
+  name="$(realm_resolve_rule_name "${selector}")"
+  if [ -z "${name}" ]; then
+    err "未找到对应规则。"
+    return 1
+  fi
+
+  current="$(awk -F '\t' -v name="${name}" '$1 == name {print $2; exit}' "${REALM_RULES_FILE}")"
+  if [ "${current}" = "1" ]; then next="0"; else next="1"; fi
+  tmp_rules="$(mktemp)"
+  awk -F '\t' -v OFS='\t' -v name="${name}" -v state="${next}" '$1 == name {$2=state} {print}' \
+    "${REALM_RULES_FILE}" > "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+
+  if [ "${next}" = "1" ]; then
+    IFS=$'\t' read -r listen_host listen_port protocol < <(awk -F '\t' -v OFS='\t' -v name="${name}" '$1 == name {print $3,$4,$7; exit}' "${REALM_RULES_FILE}")
+    case "${listen_host}" in
+      127.*|::1) ;;
+      *) realm_open_active_firewall_port "${listen_port}" "${protocol}" || true ;;
+    esac
+    ok "规则 ${name} 已启用。"
+  else
+    ok "规则 ${name} 已停用。"
+  fi
+}
+
+option_delete_realm_rule() {
+  local selector=""
+  local name=""
+  local confirm=""
+  local tmp_rules=""
+
+  if [ "$(realm_rules_record_count)" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  option_list_realm_rules
+  prompt_read -p "请输入要删除的规则序号或名称: " selector
+  name="$(realm_resolve_rule_name "${selector}")"
+  if [ -z "${name}" ]; then
+    err "未找到对应规则。"
+    return 1
+  fi
+  prompt_read -p "确认删除规则 ${name}？[y/N]: " confirm
+  case "${confirm}" in y|Y) ;; *) warn "已取消。"; return 0 ;; esac
+
+  tmp_rules="$(mktemp)"
+  awk -F '\t' -v name="${name}" '$1 != name {print}' "${REALM_RULES_FILE}" > "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+  ok "规则 ${name} 已删除。"
+  warn "为避免影响其他服务，系统防火墙中的旧端口放行规则未自动删除。"
+}
+
+option_realm_status() {
+  local service_state=""
+  local enabled_state=""
+  local service_color="${C_YELLOW}"
+  local enabled_color="${C_YELLOW}"
+  say "${C_BOLD}${C_CYAN}Realm 状态${C_RESET}"
+  print_divider
+  if [ -x "${REALM_BIN}" ]; then
+    "${REALM_BIN}" --version 2>/dev/null || true
+  else
+    warn "Realm 未安装。"
+    return 0
+  fi
+  service_state="$(systemctl is-active realm 2>/dev/null || true)"
+  enabled_state="$(systemctl is-enabled realm 2>/dev/null || true)"
+  case "${service_state}" in
+    active) service_color="${C_GREEN}" ;;
+    failed|inactive) service_color="${C_RED}" ;;
+  esac
+  case "${enabled_state}" in
+    enabled) enabled_color="${C_GREEN}" ;;
+    disabled|masked) enabled_color="${C_RED}" ;;
+  esac
+  say "规则总数: $(realm_rules_record_count)"
+  say "启用规则: $(realm_enabled_rule_count)"
+  printf '服务状态: %s%s%s\n' "${service_color}" "${service_state:-inactive}" "${C_RESET}"
+  printf '开机启动: %s%s%s\n' "${enabled_color}" "${enabled_state:-disabled}" "${C_RESET}"
+  print_divider
+  SYSTEMD_COLORS=1 SYSTEMD_URLIFY=0 systemctl --no-pager --full status realm 2>/dev/null || true
+}
+
+option_realm_logs() {
+  if ! have_cmd journalctl; then
+    warn "当前系统没有 journalctl。"
+    return 0
+  fi
+  journalctl -u realm -n 100 --no-pager || true
+}
+
+option_uninstall_realm() {
+  local confirm=""
+  local root_cmd=""
+
+  if [ ! -e "${REALM_BIN}" ] && [ ! -e "${REALM_SERVICE}" ] && [ ! -d "${REALM_DIR}" ]; then
+    warn "Realm 尚未安装。"
+    return 0
+  fi
+  if [ -e "${REALM_SERVICE}" ] && ! realm_is_managed_install; then
+    err "检测到非 mybox 管理的 Realm 服务，未执行卸载。"
+    return 1
+  fi
+  prompt_read -p "确认卸载 Realm 并删除全部转发规则？[y/N]: " confirm
+  case "${confirm}" in y|Y) ;; *) warn "已取消。"; return 0 ;; esac
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限。"
+    return 1
+  fi
+
+  run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  run_root rm -f "${REALM_SERVICE}" "${REALM_BIN}"
+  run_root rm -rf "${REALM_DIR}"
+  run_root systemctl daemon-reload
+  run_root systemctl reset-failed realm >/dev/null 2>&1 || true
+  ok "Realm 与 mybox 转发规则已卸载。"
+  warn "系统防火墙和云防火墙中的端口放行规则未自动删除。"
+}
+
+detect_firewall_backend() {
+  if have_cmd ufw; then
+    printf 'ufw'
+    return 0
+  fi
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    printf 'firewalld'
+    return 0
+  fi
+  printf 'none'
+}
+
+option_firewall_status() {
+  local backend=""
+  backend="$(detect_firewall_backend)"
+  say "${C_BOLD}${C_CYAN}防火墙状态${C_RESET}"
+  say "--------------------------------------------------"
+  case "${backend}" in
+    ufw)
+      ufw status verbose || true
+      ;;
+    firewalld)
+      firewall-cmd --state
+      firewall-cmd --list-all || true
+      ;;
+    *)
+      warn "未检测到受支持的防火墙（ufw / firewalld）。"
+      ;;
+  esac
+}
+
+allow_firewall_port() {
+  local port="$1"
+  local proto="$2"
+  local backend=""
+  local root_cmd=""
+
+  backend="$(detect_firewall_backend)"
+  if [ "${backend}" = "none" ]; then
+    warn "未检测到受支持的防火墙（ufw / firewalld）。"
+    return 1
+  fi
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能修改防火墙。"
+    return 1
+  fi
+
+  case "${backend}" in
+    ufw)
+      if [ -n "${root_cmd}" ]; then
+        ${root_cmd} ufw allow "${port}/${proto}"
+      else
+        ufw allow "${port}/${proto}"
+      fi
+
+      if ufw status 2>/dev/null | head -n 1 | grep -qi inactive; then
+        prompt_read -p "UFW 当前未启用，是否立即启用？[y/N]: " enable_ufw
+        case "${enable_ufw}" in
+          y|Y)
+            if [ -n "${root_cmd}" ]; then
+              ${root_cmd} ufw --force enable
+            else
+              ufw --force enable
+            fi
+            ;;
+        esac
+      fi
+      ;;
+    firewalld)
+      if [ -n "${root_cmd}" ]; then
+        ${root_cmd} firewall-cmd --permanent --add-port="${port}/${proto}"
+        ${root_cmd} firewall-cmd --reload
+      else
+        firewall-cmd --permanent --add-port="${port}/${proto}"
+        firewall-cmd --reload
+      fi
+      ;;
+  esac
+
+  ok "已放行端口 ${port}/${proto}"
+}
+
+option_allow_common_ports() {
+  allow_firewall_port 22 tcp
+  allow_firewall_port 80 tcp
+  allow_firewall_port 443 tcp
+}
+
+option_allow_custom_port() {
+  local port=""
+  local proto=""
+  prompt_read -p "端口号: " port
+  if [ -z "${port}" ]; then
+    warn "端口号不能为空。"
+    return 0
+  fi
+  prompt_read -p "协议 [tcp]: " proto
+  proto="${proto:-tcp}"
+  allow_firewall_port "${port}" "${proto}"
+}
+
+option_update_toolbox() {
+  local jshook=""
+  local tmp_script=""
+
+  jshook="$(get_effective_jshook)"
+
+  tmp_script="$(mktemp)"
+  if have_cmd curl; then
+    curl -fsSL \
+      -H "Accept: application/vnd.github.raw" \
+      -H "Cache-Control: no-cache" \
+      -H "jshook: ${jshook}" \
+      "https://api.github.com/repos/${REPO_SLUG}/contents/bootstrap-vps.sh?ref=main&ts=$(date +%s)" \
+      -o "${tmp_script}"
+  elif have_cmd wget; then
+    wget -qO "${tmp_script}" \
+      --header="Accept: application/vnd.github.raw" \
+      --header="Cache-Control: no-cache" \
+      --header="jshook: ${jshook}" \
+      "https://api.github.com/repos/${REPO_SLUG}/contents/bootstrap-vps.sh?ref=main&ts=$(date +%s)"
+  else
+    err "需要 curl 或 wget 其中一个命令。"
+    rm -f "${tmp_script}"
+    return 1
+  fi
+
+  chmod +x "${tmp_script}"
+  bash "${tmp_script}" --no-run --target "${SCRIPT_PATH}"
+  rm -f "${tmp_script}"
+  ok "工具箱已更新到最新版本。"
+  say "正在重新打开工具箱..."
+  exec bash "${SCRIPT_PATH}"
+}
+
+option_uninstall_toolbox() {
+  local jshook=""
+  local tmp_script=""
+  local uninstall_url="https://raw.githubusercontent.com/${REPO_SLUG}/main/scripts/uninstall-mybox.sh"
+  local download_ok=0
+  local rc=0
+
+  warn "卸载只会删除 mybox 菜单、快捷命令和 mybox PATH 配置。"
+  say "Docker、NPM、Realm、VLESS、证书及其他业务数据都会保留。"
+  prompt_read -p "确认卸载 mybox？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y|yes|YES) ;;
+    *) say "已取消。"; return 0 ;;
+  esac
+
+  jshook="$(get_effective_jshook)"
+  tmp_script="$(mktemp)"
+  if have_cmd curl; then
+    if curl -fsSL -H "jshook: ${jshook}" "${uninstall_url}" -o "${tmp_script}"; then
+      download_ok=1
+    fi
+  elif have_cmd wget; then
+    if wget -qO "${tmp_script}" --header="jshook: ${jshook}" "${uninstall_url}"; then
+      download_ok=1
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ] || [ ! -s "${tmp_script}" ] || ! bash -n "${tmp_script}"; then
+    rm -f "${tmp_script}"
+    err "卸载脚本下载或校验失败。"
+    return 1
+  fi
+
+  bash "${tmp_script}" --target "${SCRIPT_PATH}" --yes || rc=$?
+  rm -f "${tmp_script}"
+  if [ "${rc}" -eq 0 ]; then
+    exit 0
+  fi
+  return "${rc}"
+}
+
+detect_x86_64_psabi_level() {
+  awk '
+    BEGIN {
+      level=0
+      while (!/flags/) {
+        if ((getline < "/proc/cpuinfo") != 1) exit 1
+      }
+      if (/lm/&&/cmov/&&/cx8/&&/fpu/&&/fxsr/&&/mmx/&&/syscall/&&/sse2/) level = 1
+      if (level == 1 && /cx16/&&/lahf/&&/popcnt/&&/sse4_1/&&/sse4_2/&&/ssse3/) level = 2
+      if (level == 2 && /avx/&&/avx2/&&/bmi1/&&/bmi2/&&/f16c/&&/fma/&&/abm/&&/movbe/&&/xsave/) level = 3
+      if (level == 3 && /avx512f/&&/avx512bw/&&/avx512cd/&&/avx512dq/&&/avx512vl/) level = 4
+      if (level > 0) {
+        print level
+        exit 0
+      }
+      exit 1
+    }'
+}
+
+detect_xanmod_package() {
+  local level=""
+  level="$(detect_x86_64_psabi_level 2>/dev/null || printf '0')"
+  case "${level}" in
+    4|3) printf 'linux-xanmod-x64v3' ;;
+    2) printf 'linux-xanmod-x64v2' ;;
+    1) printf 'linux-xanmod-lts-x64v1' ;;
+    *) return 1 ;;
+  esac
+}
+
+get_linux_codename() {
+  if have_cmd lsb_release; then
+    lsb_release -sc 2>/dev/null && return 0
+  fi
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    if [ -n "${VERSION_CODENAME:-}" ]; then
+      printf '%s\n' "${VERSION_CODENAME}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+option_ping_test() {
+  local target=""
+  prompt_read -p "请输入目标域名或 IP: " target
+  if [ -z "${target}" ]; then
+    warn "目标不能为空。"
+    return 0
+  fi
+  if have_cmd ping; then
+    run_with_tty ping -c 4 "${target}"
+  else
+    err "当前系统没有 ping 命令。"
+  fi
+}
+
+option_trace_test() {
+  local target=""
+  prompt_read -p "请输入目标域名或 IP: " target
+  if [ -z "${target}" ]; then
+    warn "目标不能为空。"
+    return 0
+  fi
+
+  if have_cmd traceroute; then
+    run_with_tty traceroute "${target}"
+  elif have_cmd tracepath; then
+    run_with_tty tracepath "${target}"
+  else
+    err "当前系统没有 traceroute / tracepath。"
+  fi
+}
+
+option_show_ip_route() {
+  if have_cmd ip; then
+    ip route show
+  elif have_cmd route; then
+    route -n
+  else
+    err "当前系统没有 ip / route 命令。"
+  fi
+}
+
+option_show_listening_ports() {
+  if have_cmd ss; then
+    ss -tulpn
+  elif have_cmd netstat; then
+    netstat -tulpn
+  else
+    err "当前系统没有 ss / netstat。"
+  fi
+}
+
+option_show_top_processes() {
+  say "[CPU TOP 10]"
+  ps -eo pid,ppid,user,%cpu,%mem,comm --sort=-%cpu | sed -n '1,11p'
+  say "--------------------------------------------------"
+  say "[MEM TOP 10]"
+  ps -eo pid,ppid,user,%cpu,%mem,comm --sort=-%mem | sed -n '1,11p'
+}
+
+option_show_common_service_status() {
+  local services="ssh sshd nginx docker xray hysteria-server hysteria"
+  local svc=""
+
+  if have_cmd systemctl; then
+    for svc in ${services}; do
+      if systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service"; then
+        printf '%-18s %s\n' "${svc}" "$(systemctl is-active "${svc}" 2>/dev/null || printf 'unknown')"
+      fi
+    done
+  else
+    warn "当前系统没有 systemctl，无法统一查询服务状态。"
+  fi
+}
+
+option_restart_ssh_service() {
+  local root_cmd=""
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能重启 SSH 服务。"
+    return 1
+  fi
+
+  prompt_read -p "确认重启 SSH 服务？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} systemctl restart sshd 2>/dev/null || \
+    ${root_cmd} systemctl restart ssh 2>/dev/null || \
+    ${root_cmd} service sshd restart 2>/dev/null || \
+    ${root_cmd} service ssh restart 2>/dev/null
+  else
+    systemctl restart sshd 2>/dev/null || \
+    systemctl restart ssh 2>/dev/null || \
+    service sshd restart 2>/dev/null || \
+    service ssh restart 2>/dev/null
+  fi
+  ok "SSH 服务已重启。"
+}
+
+option_recent_logins() {
+  if have_cmd last; then
+    last -a | sed -n '1,20p'
+  else
+    err "当前系统没有 last 命令。"
+  fi
+}
+
+option_reboot_server() {
+  local root_cmd=""
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能重启服务器。"
+    return 1
+  fi
+
+  warn "重启服务器会导致当前 SSH 会话断开。"
+  prompt_read -p "确认重启服务器？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} reboot
+  else
+    reboot
+  fi
+}
+
+auto_shutdown_systemd_ready() {
+  if ! have_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    err "当前系统未运行 systemd，无法使用 VPS 到期关机。"
+    return 1
+  fi
+}
+
+auto_shutdown_systemctl() {
+  local root_cmd="$1"
+  shift
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} systemctl "$@"
+  else
+    systemctl "$@"
+  fi
+}
+
+auto_shutdown_read_expiry() {
+  if [ -r "${AUTO_SHUTDOWN_EXPIRY_FILE}" ]; then
+    sed -n '1p' "${AUTO_SHUTDOWN_EXPIRY_FILE}"
+  fi
+}
+
+auto_shutdown_normalize_expiry() {
+  local input="$1"
+  local candidate=""
+  local normalized=""
+
+  if [[ "${input}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]]; then
+    candidate="${input}:00"
+  elif [[ "${input}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    candidate="${input}"
+  else
+    return 1
+  fi
+
+  if ! normalized="$(date -d "${candidate}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"; then
+    return 1
+  fi
+
+  if [ "${normalized}" != "${candidate}" ]; then
+    return 1
+  fi
+
+  printf '%s' "${normalized}"
+}
+
+auto_shutdown_add_month_expiry() {
+  local expiry="$1"
+  local source_date=""
+  local source_month_start=""
+  local target_month_start=""
+  local last_day=""
+  local source_day=""
+  local target_day=0
+  local target_date=""
+  local source_time=""
+
+  if ! source_date="$(date -d "${expiry}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"; then
+    return 1
+  fi
+  source_month_start="$(date -d "${source_date}" '+%Y-%m-01' 2>/dev/null)" || return 1
+  target_month_start="$(date -d "${source_month_start} +1 month" '+%Y-%m-01' 2>/dev/null)" || return 1
+  last_day="$(date -d "${target_month_start} +1 month -1 day" '+%d' 2>/dev/null)" || return 1
+  source_day="$(date -d "${source_date}" '+%d' 2>/dev/null)" || return 1
+  source_time="$(date -d "${source_date}" '+%H:%M:%S' 2>/dev/null)" || return 1
+
+  target_day=$((10#${source_day}))
+  if [ "${target_day}" -gt "$((10#${last_day}))" ]; then
+    target_day=$((10#${last_day}))
+  fi
+
+  printf -v target_date '%s%02d %s' "${target_month_start:0:8}" "${target_day}" "${source_time}"
+  auto_shutdown_normalize_expiry "${target_date}"
+}
+
+auto_shutdown_print_remaining() {
+  local expiry_epoch="$1"
+  local now_epoch="$(date +%s)"
+  local remaining=$((expiry_epoch - now_epoch))
+  local days=0
+  local hours=0
+  local minutes=0
+  local seconds=0
+
+  if [ "${remaining}" -le 0 ]; then
+    warn "到期时间已到或已过期。"
+    return 0
+  fi
+
+  days=$((remaining / 86400))
+  hours=$(((remaining % 86400) / 3600))
+  minutes=$(((remaining % 3600) / 60))
+  seconds=$((remaining % 60))
+  say "剩余时间: ${days} 天 ${hours} 小时 ${minutes} 分 ${seconds} 秒"
+}
+
+auto_shutdown_schedule_expiry() {
+  local requested_expiry="$1"
+  local normalized_expiry=""
+  local expiry_epoch=""
+  local now_epoch=""
+  local root_cmd=""
+  local shutdown_path=""
+  local shutdown_args=""
+  local service_tmp=""
+  local timer_tmp=""
+  local expiry_tmp=""
+
+  auto_shutdown_systemd_ready || return 1
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能设置 VPS 到期关机。"
+    return 1
+  fi
+
+  if ! normalized_expiry="$(auto_shutdown_normalize_expiry "${requested_expiry}")"; then
+    err "日期格式无效，必须使用 YYYY-MM-DD HH:MM 或 YYYY-MM-DD HH:MM:SS。"
+    return 1
+  fi
+  if ! expiry_epoch="$(date -d "${normalized_expiry}" +%s 2>/dev/null)"; then
+    err "无法解析到期时间。"
+    return 1
+  fi
+  now_epoch="$(date +%s)"
+  if [ "${expiry_epoch}" -le "${now_epoch}" ]; then
+    err "到期时间必须晚于当前时间。"
+    return 1
+  fi
+
+  shutdown_path="$(command -v shutdown 2>/dev/null || true)"
+  if [ -z "${shutdown_path}" ]; then
+    shutdown_path="$(command -v systemctl 2>/dev/null || true)"
+    shutdown_args="poweroff"
+  else
+    shutdown_args="-h now"
+  fi
+  if [ -z "${shutdown_path}" ]; then
+    err "当前系统没有 shutdown 或 systemctl 命令。"
+    return 1
+  fi
+
+  service_tmp="$(mktemp)"
+  timer_tmp="$(mktemp)"
+  expiry_tmp="$(mktemp)"
+  cat > "${service_tmp}" <<EOF
+[Unit]
+Description=mybox VPS 到期自动关机
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${shutdown_path} ${shutdown_args}
+EOF
+
+  cat > "${timer_tmp}" <<EOF
+[Unit]
+Description=mybox VPS 到期自动关机定时器
+
+[Timer]
+OnCalendar=${normalized_expiry}
+Persistent=true
+AccuracySec=1s
+Unit=${AUTO_SHUTDOWN_SERVICE_UNIT}
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  printf '%s\n' "${normalized_expiry}" > "${expiry_tmp}"
+
+  if [ -n "${root_cmd}" ]; then
+    if ! ${root_cmd} install -d -m 755 "${AUTO_SHUTDOWN_DIR}" || \
+       ! ${root_cmd} install -m 644 "${service_tmp}" "${AUTO_SHUTDOWN_SERVICE_FILE}" || \
+       ! ${root_cmd} install -m 644 "${timer_tmp}" "${AUTO_SHUTDOWN_TIMER_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "写入自动关机 systemd 配置失败。"
+      return 1
+    fi
+  else
+    if ! install -d -m 755 "${AUTO_SHUTDOWN_DIR}" || \
+       ! install -m 644 "${service_tmp}" "${AUTO_SHUTDOWN_SERVICE_FILE}" || \
+       ! install -m 644 "${timer_tmp}" "${AUTO_SHUTDOWN_TIMER_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "写入自动关机 systemd 配置失败。"
+      return 1
+    fi
+  fi
+
+  if ! auto_shutdown_systemctl "${root_cmd}" daemon-reload; then
+    rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+    err "重新加载 systemd 配置失败。"
+    return 1
+  fi
+  if ! auto_shutdown_systemctl "${root_cmd}" enable "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+    rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+    err "启用自动关机定时器失败。"
+    return 1
+  fi
+  if ! auto_shutdown_systemctl "${root_cmd}" restart "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+    if ! auto_shutdown_systemctl "${root_cmd}" start "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "启动自动关机定时器失败，请检查 systemd 状态。"
+      return 1
+    fi
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    if ! ${root_cmd} install -m 644 "${expiry_tmp}" "${AUTO_SHUTDOWN_EXPIRY_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "保存到期时间失败。"
+      return 1
+    fi
+  else
+    if ! install -m 644 "${expiry_tmp}" "${AUTO_SHUTDOWN_EXPIRY_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "保存到期时间失败。"
+      return 1
+    fi
+  fi
+
+  rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+  ok "已设置 VPS 到期自动关机。"
+  say "到期时间: ${normalized_expiry}"
+  say "到期后将由 systemd 自动执行关机；如果到期时 VPS 正在关机或离线，重新启动后会立即执行。"
+}
+
+option_auto_shutdown_set_expiry() {
+  local current_expiry=""
+  local input=""
+
+  current_expiry="$(auto_shutdown_read_expiry)"
+  if [ -n "${current_expiry}" ]; then
+    warn "当前已设置到期时间: ${current_expiry}"
+    warn "如需替换时间，请选择“修改到期日期”。"
+    return 0
+  fi
+
+  prompt_read -p "到期时间（YYYY-MM-DD HH:MM，例如 2026-09-30 23:59）: " input
+  [ -n "${input}" ] || { warn "已取消。"; return 0; }
+  auto_shutdown_schedule_expiry "${input}"
+}
+
+option_auto_shutdown_add_month() {
+  local current_expiry=""
+  local base_epoch=""
+  local now_epoch=""
+  local base_expiry=""
+  local new_expiry=""
+
+  current_expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${current_expiry}" ]; then
+    warn "当前还没有设置到期时间，请先选择“设置到期时间”。"
+    return 0
+  fi
+  if ! base_epoch="$(date -d "${current_expiry}" +%s 2>/dev/null)"; then
+    err "当前到期时间记录无效，请使用“修改到期日期”重新设置。"
+    return 1
+  fi
+  now_epoch="$(date +%s)"
+  if [ "${base_epoch}" -lt "${now_epoch}" ]; then
+    base_epoch="${now_epoch}"
+  fi
+  base_expiry="$(date -d "@${base_epoch}" '+%Y-%m-%d %H:%M:%S')"
+  if ! new_expiry="$(auto_shutdown_add_month_expiry "${base_expiry}")"; then
+    err "无法计算下一个月的到期时间。"
+    return 1
+  fi
+  auto_shutdown_schedule_expiry "${new_expiry}"
+}
+
+option_auto_shutdown_modify_expiry() {
+  local input=""
+
+  prompt_read -p "新的到期时间（YYYY-MM-DD HH:MM，例如 2026-09-30 23:59）: " input
+  [ -n "${input}" ] || { warn "已取消。"; return 0; }
+  auto_shutdown_schedule_expiry "${input}"
+}
+
+option_auto_shutdown_view() {
+  local expiry=""
+  local expiry_epoch=""
+  local timer_state="未运行"
+  local timer_enabled="未启用"
+
+  expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${expiry}" ]; then
+    warn "当前未设置 VPS 到期自动关机。"
+    return 0
+  fi
+  if ! expiry_epoch="$(date -d "${expiry}" +%s 2>/dev/null)"; then
+    err "到期时间记录无效: ${expiry}"
+    return 1
+  fi
+
+  if have_cmd systemctl; then
+    timer_state="$(systemctl is-active "${AUTO_SHUTDOWN_TIMER_UNIT}" 2>/dev/null || true)"
+    timer_enabled="$(systemctl is-enabled "${AUTO_SHUTDOWN_TIMER_UNIT}" 2>/dev/null || true)"
+    timer_state="${timer_state:-未运行}"
+    timer_enabled="${timer_enabled:-未启用}"
+  fi
+
+  say "VPS 到期自动关机"
+  say "--------------------------------------------------"
+  say "到期时间: ${expiry}"
+  say "定时器状态: ${timer_state}"
+  say "开机启动: ${timer_enabled}"
+  auto_shutdown_print_remaining "${expiry_epoch}"
+  say "--------------------------------------------------"
+}
+
+option_auto_shutdown_cancel() {
+  local root_cmd=""
+  local expiry=""
+
+  expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${expiry}" ] && [ ! -e "${AUTO_SHUTDOWN_SERVICE_FILE}" ] && [ ! -e "${AUTO_SHUTDOWN_TIMER_FILE}" ]; then
+    warn "当前没有 VPS 到期自动关机计划。"
+    return 0
+  fi
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能取消 VPS 到期自动关机。"
+    return 1
+  fi
+
+  if auto_shutdown_systemd_ready >/dev/null 2>&1; then
+    auto_shutdown_systemctl "${root_cmd}" disable --now "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} rm -f "${AUTO_SHUTDOWN_EXPIRY_FILE}" "${AUTO_SHUTDOWN_SERVICE_FILE}" "${AUTO_SHUTDOWN_TIMER_FILE}"
+    ${root_cmd} rmdir "${AUTO_SHUTDOWN_DIR}" >/dev/null 2>&1 || true
+  else
+    rm -f "${AUTO_SHUTDOWN_EXPIRY_FILE}" "${AUTO_SHUTDOWN_SERVICE_FILE}" "${AUTO_SHUTDOWN_TIMER_FILE}"
+    rmdir "${AUTO_SHUTDOWN_DIR}" >/dev/null 2>&1 || true
+  fi
+  if auto_shutdown_systemd_ready >/dev/null 2>&1; then
+    auto_shutdown_systemctl "${root_cmd}" daemon-reload >/dev/null 2>&1 || true
+  fi
+  ok "已取消 VPS 到期自动关机。"
+}
+
+run_dd_reinstall_system() {
+  local root_cmd=""
+  local jshook=""
+  local distro="$1"
+  local version="$2"
+  local root_pass=""
+  local tmp_file=""
+  local reinstall_url="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+  local image_url=""
+  local disk_source=""
+  local disk_name=""
+  local disk_size=""
+  local reinstall_rc=0
+  local reboot_choice=""
+  local -a reinstall_args=()
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能执行 DD 重装。"
+    return 1
+  fi
+
+  if [ "${distro}" = "windows" ] && [ "${version}" = "10" ]; then
+    root_pass="Teddysun.com"
+  else
+    prompt_secret -p "新系统 root/管理员密码: " root_pass
+  fi
+  printf '\n'
+  if [ -z "${root_pass}" ]; then
+    warn "密码不能为空。"
+    return 0
+  fi
+
+  jshook="$(get_effective_jshook)"
+
+  if [ "${distro}" = "windows" ] && [ "${version}" = "11" ]; then
+    disk_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    disk_name="$(lsblk -ndo PKNAME "${disk_source}" 2>/dev/null | head -n 1 || true)"
+    while [ -n "${disk_name}" ]; do
+      local parent_name=""
+      parent_name="$(lsblk -ndo PKNAME "/dev/${disk_name}" 2>/dev/null | head -n 1 || true)"
+      if [ -z "${parent_name}" ]; then
+        break
+      fi
+      disk_name="${parent_name}"
+    done
+    if [ -n "${disk_name}" ]; then
+      disk_size="$(lsblk -bndo SIZE "/dev/${disk_name}" 2>/dev/null || true)"
+    fi
+    if [ -n "${disk_size}" ] && [ "${disk_size}" -lt $((25 * 1024 * 1024 * 1024)) ]; then
+      err "Windows 11 安装需要至少约 25 GiB 磁盘；当前只有 $((disk_size / 1024 / 1024 / 1024)) GiB。"
+      err "20 GiB 机器请选择 Windows 10（LTSC DD 镜像）。"
+      return 1
+    fi
+  fi
+
+  if [ "${distro}" = "windows" ] && [ "${version}" = "10" ]; then
+    image_url="https://dl.lamp.sh/vhd/zh-cn_windows10_ltsc.xz"
+    reinstall_args=(
+      dd
+      --img "${image_url}"
+      --username administrator
+      --password "${root_pass}"
+      --rdp-port 3389
+    )
+    warn "Windows 10 使用中文 LTSC raw 镜像，适配 20 GiB 磁盘；最终管理员密码为 Teddysun.com。"
+  elif [ "${distro}" = "windows" ]; then
+    reinstall_args=(
+      windows
+      --image-name "Windows 11 Pro"
+      --lang zh-cn
+      --username administrator
+      --password "${root_pass}"
+      --rdp-port 3389
+    )
+  else
+    case "${distro}" in
+      debian|ubuntu|centos|alma|rocky|almalinux|fedora)
+        reinstall_args=("${distro}" "${version}" --username root --password "${root_pass}")
+        ;;
+      *)
+        err "暂不支持的系统类型: ${distro}"
+        return 1
+        ;;
+    esac
+  fi
+
+  tmp_file="$(mktemp)"
+  if have_cmd curl; then
+    curl -fsSL --retry 3 --connect-timeout 10 -H "jshook: ${jshook}" \
+      "${reinstall_url}?ts=$(date +%s)" -o "${tmp_file}"
+  elif have_cmd wget; then
+    wget --no-check-certificate --tries=3 --timeout=20 -qO "${tmp_file}" \
+      --header="jshook: ${jshook}" "${reinstall_url}?ts=$(date +%s)"
+  else
+    err "需要 curl 或 wget 其中一个命令。"
+    rm -f "${tmp_file}"
+    return 1
+  fi
+
+  chmod +x "${tmp_file}"
+  warn "即将开始 DD 重装到 ${distro} ${version}，当前会话可能很快断开。"
+  if [ -n "${root_cmd}" ]; then
+    run_with_tty "${root_cmd}" bash "${tmp_file}" "${reinstall_args[@]}" || reinstall_rc=$?
+  else
+    run_with_tty bash "${tmp_file}" "${reinstall_args[@]}" || reinstall_rc=$?
+  fi
+  if [ "${reinstall_rc}" -ne 0 ]; then
+    err "DD 重装脚本执行失败（退出码 ${reinstall_rc}），不会自动重启。"
+    return "${reinstall_rc}"
+  fi
+
+  printf '\n'
+  warn "DD 重装引导已准备完成。"
+  prompt_read -p "按回车重启系统并开始 DD（输入 n 取消）: " reboot_choice
+  case "${reboot_choice}" in
+    n|N)
+      warn "已取消重启，DD 引导仍保留；可稍后手动重启继续。"
+      return 0
+      ;;
+  esac
+  warn "正在重启系统，当前 SSH 会话将断开..."
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} reboot
+  else
+    reboot
+  fi
+}
+
+dd_reinstall_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "DD 重装系统（危险）"
+    print_divider
+    say "警告："
+    say "- 会覆盖当前系统"
+    say "- 会中断当前 SSH 会话"
+    say "- 可能自动重启"
+    say "- 当前数据可能不可恢复"
+    print_divider
+    menu_item "1" "Debian 12"
+    menu_item "2" "Debian 13"
+    menu_item "3" "Ubuntu 22.04"
+    menu_item "4" "Ubuntu 24.04"
+    menu_item "5" "Windows 10"
+    menu_item "6" "Windows 11"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择 [2]: " choice
+    printf '\n'
+    case "${choice:-2}" in
+      1) run_dd_reinstall_system "debian" "12"; continue ;;
+      2) run_dd_reinstall_system "debian" "13"; continue ;;
+      3) run_dd_reinstall_system "ubuntu" "22.04"; continue ;;
+      4) run_dd_reinstall_system "ubuntu" "24.04"; continue ;;
+      5) run_dd_reinstall_system "windows" "10"; continue ;;
+      6) run_dd_reinstall_system "windows" "11"; continue ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+apply_password_mode() {
+  local password_auth="$1"
+  local kbd_auth="$2"
+  local challenge_auth="$3"
+  local permit_root="$4"
+  local root_cmd=""
+  local tmp_script=""
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能修改 SSH 服务配置。"
+    return 1
+  fi
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<EOF
+set -e
+CONFIG="/etc/ssh/sshd_config"
+# OpenSSH uses the first value it encounters for most settings.  Ubuntu's
+# cloud-init drop-in commonly enables PasswordAuthentication in
+# 50-cloud-init.conf, so a 99-* file cannot override it.
+MANAGED_FILE="/etc/ssh/sshd_config.d/00-vps-ssh-key-menu.conf"
+LEGACY_MANAGED_FILE="/etc/ssh/sshd_config.d/99-vps-ssh-key-menu.conf"
+USE_INCLUDE=0
+
+if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\\.d/\\*\\.conf' "\${CONFIG}" 2>/dev/null; then
+  USE_INCLUDE=1
+fi
+
+backup_file() {
+  if [ -f "\$1" ]; then
+    cp "\$1" "\$1.bak.\$(date +%F-%H%M%S)"
+  fi
+}
+
+if [ "\${USE_INCLUDE}" = "1" ]; then
+  mkdir -p /etc/ssh/sshd_config.d
+  backup_file "\${MANAGED_FILE}"
+  if [ -f "\${LEGACY_MANAGED_FILE}" ]; then
+    backup_file "\${LEGACY_MANAGED_FILE}"
+    rm -f "\${LEGACY_MANAGED_FILE}"
+  fi
+  cat > "\${MANAGED_FILE}" <<'CONF'
+# Managed by ${SCRIPT_NAME}
+PubkeyAuthentication yes
+PasswordAuthentication ${password_auth}
+KbdInteractiveAuthentication ${kbd_auth}
+ChallengeResponseAuthentication ${challenge_auth}
+PermitRootLogin ${permit_root}
+CONF
+else
+  backup_file "\${CONFIG}"
+  TMP="\$(mktemp)"
+  awk '
+    BEGIN {skip=0}
+    \$0 == "${MARK_BEGIN}" {skip=1; next}
+    \$0 == "${MARK_END}" {skip=0; next}
+    !skip {print}
+  ' "\${CONFIG}" > "\${TMP}"
+  cat >> "\${TMP}" <<'CONF'
+${MARK_BEGIN}
+PubkeyAuthentication yes
+PasswordAuthentication ${password_auth}
+KbdInteractiveAuthentication ${kbd_auth}
+ChallengeResponseAuthentication ${challenge_auth}
+PermitRootLogin ${permit_root}
+${MARK_END}
+CONF
+  mv "\${TMP}" "\${CONFIG}"
+fi
+
+if command -v sshd >/dev/null 2>&1; then
+  sshd -t
+elif [ -x /usr/sbin/sshd ]; then
+  /usr/sbin/sshd -t
+fi
+
+systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart 2>/dev/null
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}"
+  else
+    bash "${tmp_script}"
+  fi
+
+  rm -f "${tmp_script}"
+}
+
+option_disable_password_login() {
+  say "请先确保你已经在新终端里测试过公钥登录。"
+  prompt_read -p "确认关闭密码登录？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y)
+      apply_password_mode "no" "no" "no" "prohibit-password"
+      ok "密码登录已关闭。"
+      ;;
+    *)
+      warn "已取消。"
+      ;;
+  esac
+}
+
+option_enable_password_login() {
+  prompt_read -p "确认开启密码登录？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y)
+      apply_password_mode "yes" "yes" "yes" "yes"
+      ok "密码登录已开启。"
+      ;;
+    *)
+      warn "已取消。"
+      ;;
+  esac
+}
+
+print_toolbox_menu() {
+  clear 2>/dev/null || true
+  print_logo
+  print_section_title "主菜单"
+  say "  密码登录 : $(password_status_text)"
+  say "  公钥条数 : $(count_authorized_keys)"
+  print_divider
+  menu_item "1" "SSH 登录管理"
+  menu_item "2" "多协议脚本"
+  menu_item "3" "Docker + NPM 安装 / 容器管理"
+  menu_item "4" "端口转发 / Realm"
+  menu_item "5" "网络工具 / BBR"
+  menu_item "6" "系统工具 / DD"
+  menu_item "7" "更新工具箱"
+  menu_item "8" "卸载 mybox（保留业务数据）"
+  menu_exit_item
+  print_divider
+}
+
+docker_npm_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Docker + Nginx Proxy Manager"
+    print_docker_npm_menu_status
+    print_divider
+    menu_item "1" "安装 / 卸载 Docker 与 NPM（上游管理器）"
+    menu_item "2" "Docker + NPM 状态总览"
+    menu_item "3" "NPM 专项管理"
+    menu_item "4" "Docker 容器管理"
+    menu_item "5" "Docker 镜像 / 空间清理"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_run_npm_docker || true; pause ;;
+      2) option_docker_status || true; pause ;;
+      3) npm_menu_loop ;;
+      4) docker_menu_loop ;;
+      5) docker_storage_menu_loop ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。"; pause ;;
+    esac
+  done
+}
+
+npm_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Nginx Proxy Manager 管理"
+    say "  当前状态: $(npm_state_text "$(get_npm_summary)")"
+    print_divider
+    menu_item "1" "查看 NPM 状态 / 面板地址"
+    menu_item "2" "启动 NPM"
+    menu_item "3" "停止 NPM"
+    menu_item "4" "重启 NPM"
+    menu_item "5" "查看最近日志"
+    menu_item "6" "拉取最新镜像并更新 NPM"
+    menu_item "7" "备份 NPM 配置、数据和证书"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_npm_status || true ;;
+      2) option_npm_start || true ;;
+      3) option_npm_stop || true ;;
+      4) option_npm_restart || true ;;
+      5) option_npm_logs || true ;;
+      6) option_npm_update || true ;;
+      7) option_npm_backup || true ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+docker_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Docker 容器管理"
+    print_divider
+    menu_item "1" "查看全部容器（带编号）"
+    menu_item "2" "启动单个容器"
+    menu_item "3" "停止单个容器"
+    menu_item "4" "重启单个容器"
+    menu_item "5" "查看容器最近日志"
+    menu_item "6" "实时跟踪容器日志"
+    menu_item "7" "查看单个容器资源占用"
+    menu_item "8" "查看单个容器详情"
+    menu_item "9" "删除已停止容器"
+    menu_item "10" "启动全部容器"
+    menu_item "11" "停止全部运行中容器"
+    menu_item "12" "重启全部运行中容器"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_docker_list_all || true ;;
+      2) option_docker_control_one start "启动" || true ;;
+      3) option_docker_control_one stop "停止" || true ;;
+      4) option_docker_control_one restart "重启" || true ;;
+      5) option_docker_logs || true ;;
+      6) option_docker_live_logs || true ;;
+      7) option_docker_stats_one || true ;;
+      8) option_docker_inspect_one || true ;;
+      9) option_docker_remove_one || true ;;
+      10) option_docker_start_all || true ;;
+      11) option_docker_stop_all || true ;;
+      12) option_docker_restart_all || true ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+docker_storage_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Docker 镜像 / 空间清理"
+    warn "以下清理项默认不删除 Docker 数据卷。"
+    print_divider
+    menu_item "1" "查看 Docker 空间占用"
+    menu_item "2" "查看本地镜像"
+    menu_item "3" "清理已停止容器"
+    menu_item "4" "清理悬空镜像"
+    menu_item "5" "清理构建缓存"
+    menu_item "6" "常规 system prune（不删数据卷）"
+    menu_item "7" "深度 system prune -a（不删数据卷）"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_docker_disk_usage || true ;;
+      2) option_docker_images || true ;;
+      3) option_docker_prune_stopped || true ;;
+      4) option_docker_prune_images || true ;;
+      5) option_docker_prune_build_cache || true ;;
+      6) option_docker_prune || true ;;
+      7) option_docker_prune_all_images || true ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+realm_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "端口转发 / Realm"
+    print_divider
+    menu_item "1" "安装 / 更新 Realm"
+    menu_item "2" "添加转发规则"
+    menu_item "3" "查看转发规则"
+    menu_item "4" "启用 / 停用规则"
+    menu_item "5" "删除转发规则"
+    menu_item "6" "查看 Realm 状态"
+    menu_item "7" "查看最近日志"
+    menu_item "8" "卸载 Realm"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_install_realm || true ;;
+      2) option_add_realm_rule || true ;;
+      3) option_list_realm_rules || true ;;
+      4) option_toggle_realm_rule || true ;;
+      5) option_delete_realm_rule || true ;;
+      6) option_realm_status || true ;;
+      7) option_realm_logs || true ;;
+      8) option_uninstall_realm || true ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+firewall_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "常用端口放行"
+    print_divider
+    menu_item "1" "放行 SSH (22/tcp)"
+    menu_item "2" "放行 HTTP (80/tcp)"
+    menu_item "3" "放行 HTTPS (443/tcp)"
+    menu_item "4" "一次放行 22/80/443"
+    menu_item "5" "放行自定义端口"
+    menu_item "6" "查看防火墙状态"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) allow_firewall_port 22 tcp ;;
+      2) allow_firewall_port 80 tcp ;;
+      3) allow_firewall_port 443 tcp ;;
+      4) option_allow_common_ports ;;
+      5) option_allow_custom_port ;;
+      6) option_firewall_status ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+network_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "网络工具"
+    print_divider
+    menu_item "1" "普通内核启用 BBR"
+    menu_item "2" "普通内核查看 BBR 状态"
+    menu_item "3" "BBR 直连/落地优化（智能带宽检测）"
+    menu_item "4" "安装 NextTrace"
+    menu_item "5" "Ping 测试"
+    menu_item "6" "Traceroute / Tracepath"
+    menu_item "7" "查看本机路由"
+    menu_item "8" "WARP (Cloudflare · 双栈/出站)"
+    menu_item "9" "安装 XanMod 内核 (BBRv3)"
+    menu_item "10" "查看 XanMod / BBRv3 状态"
+    menu_item "11" "NodeQuality 综合测评"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_enable_bbr ;;
+      2) option_bbr_info ;;
+      3) option_run_bbr_direct_optimize ;;
+      4) option_run_nexttrace ;;
+      5) option_ping_test ;;
+      6) option_trace_test ;;
+      7) option_show_ip_route ;;
+      8) option_run_warp ;;
+      9) option_install_xanmod ;;
+      10) option_xanmod_info ;;
+      11) option_run_nodequality ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+komari_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Komari 服务器监控"
+    print_divider
+    menu_item "1" "安装 / 重装 Komari"
+    menu_item "2" "卸载 Komari"
+    menu_item "3" "升级 Komari"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_install_komari_server ;;
+      2) option_uninstall_komari_server ;;
+      3) option_upgrade_komari_server ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+auto_shutdown_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "VPS 到期关机"
+    say "设置一个到期时间，到点后由 systemd 自动关闭 VPS。"
+    print_divider
+    menu_item "1" "设置到期时间"
+    menu_item "2" "增加 1 个月"
+    menu_item "3" "修改到期日期"
+    menu_item "4" "查看剩余时间"
+    menu_item "5" "取消自动关机"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_auto_shutdown_set_expiry ;;
+      2) option_auto_shutdown_add_month ;;
+      3) option_auto_shutdown_modify_expiry ;;
+      4) option_auto_shutdown_view ;;
+      5) option_auto_shutdown_cancel ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+system_tools_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "系统工具"
+    print_divider
+    menu_item "1" "查看监听端口"
+    menu_item "2" "查看高占用进程"
+    menu_item "3" "查看常见服务状态"
+    menu_item "4" "重启 SSH 服务"
+    menu_item "5" "查看最近登录"
+    menu_item "6" "重启服务器"
+    menu_item "7" "DD 重装系统（危险）"
+    menu_item "8" "Komari 服务器监控"
+    menu_item "9" "VPS 到期关机"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_show_listening_ports ;;
+      2) option_show_top_processes ;;
+      3) option_show_common_service_status ;;
+      4) option_restart_ssh_service ;;
+      5) option_recent_logins ;;
+      6) option_reboot_server ;;
+      7) dd_reinstall_menu_loop ;;
+      8) komari_menu_loop ;;
+      9) auto_shutdown_menu_loop ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+ssh_menu_loop() {
+  local choice=""
+  while true; do
+    print_ssh_menu
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_generate_keypair ;;
+      2) option_manual_key ;;
+      3) option_import_github ;;
+      4) option_import_url ;;
+      5) option_edit_authorized_keys ;;
+      6) option_view_local_keys ;;
+      7) option_view_authorized_keys ;;
+      8) option_disable_password_login ;;
+      9) option_enable_password_login ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+main_loop() {
+  local choice=""
+  while true; do
+    print_toolbox_menu
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) ssh_menu_loop ;;
+      2) option_run_vless_project ;;
+      3) docker_npm_menu_loop ;;
+      4) realm_menu_loop ;;
+      5) network_menu_loop ;;
+      6) system_tools_menu_loop ;;
+      7) option_update_toolbox ;;
+      8) option_uninstall_toolbox ;;
+      0) exit 0 ;;
+      *) warn "无效选项，请重新输入。"; pause ;;
+    esac
+  done
+}
+
+main_loop
+MENU
+  chmod +x "${TARGET_PATH}"
+}
+
+main() {
+  write_menu_script
+  echo "已安装到: ${TARGET_PATH}"
+
+  if [ "${INSTALL_SHORTCUT}" = "1" ]; then
+    install_shortcut "${SHORTCUT_NAME}"
+  fi
+
+  if [ "${RUN_AFTER_INSTALL}" = "1" ]; then
+    echo "正在启动 mybox..."
+    exec bash "${TARGET_PATH}"
+  fi
+}
+
+main
