@@ -203,7 +203,7 @@ export REALM_DOWNLOAD_URL='https://你的镜像域名/realm/{asset}'
 export REALM_SHA256='你的 sha256'
 ```
 
-`REALM_DOWNLOAD_URL` 中的 `{asset}` 会被替换为实际架构文件名。下载器会校验 tar.gz 格式、解压结果和 Realm 二进制可执行性；设置 `REALM_SHA256` 后还会在安装前进行 SHA-256 校验。
+`REALM_DOWNLOAD_URL` 中的 `{asset}` 会被替换为实际架构文件名。下载器会校验 tar.gz 格式、解压结果和 Realm 二进制可执行性；设置 `REALM_SHA256` 后还会在安装前进行 SHA-256 校验。 默认回退还包含你提供的 GitProxy 源（`v2.3.4`）；如需切换该回退版本，可设置 `REALM_GITPROXY_VERSION=v2.9.6`。
 
 ### 4. 端口转发 / Realm
 

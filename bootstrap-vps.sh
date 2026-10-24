@@ -3137,6 +3137,7 @@ realm_download_asset() {
   local output="$2"
   local url=""
   local custom_url="${REALM_DOWNLOAD_URL:-}"
+  local gitproxy_version="${REALM_GITPROXY_VERSION:-v2.3.4}"
   local -a urls=()
   if [ -n "${custom_url}" ]; then
     custom_url="${custom_url//\{asset\}/${asset}}"
@@ -3146,6 +3147,7 @@ realm_download_asset() {
   # IPv6-only hosts whose provider cannot reach GitHub over IPv6.
   urls+=(
     "https://github.com/zhboner/realm/releases/latest/download/${asset}"
+    "https://api.gitproxy.dev/github.com/zhboner/realm/releases/download/${gitproxy_version}/${asset}"
     "https://ghproxy.net/https://github.com/zhboner/realm/releases/latest/download/${asset}"
     "https://gh-proxy.com/https://github.com/zhboner/realm/releases/latest/download/${asset}"
   )
