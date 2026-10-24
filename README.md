@@ -249,6 +249,8 @@ export REALM_SHA256='你的 sha256'
 
 XanMod APT 源使用官方系统代号 suite。安装前会清理旧的 `/etc/apt/sources.list.d/xanmod-release.list` 并自动覆盖旧 keyring，再检查 `https://deb.xanmod.org/dists/<codename>/Release` 是否存在；如果当前系统代号（例如 Ubuntu 22.04 的 `jammy`）已不在 XanMod APT 仓库中，会给出明确提示而不是留下坏源导致 `apt update` 失败。
 
+WireGuard IPv4 出口也已内置到 mybox。进入“网络工具”后选择“WireGuard / IPv4 出口”，在 IPv6-only VPS 上输入双栈 VPS 的 IPv6 地址和公网网卡名。mybox 会生成本机客户端配置和双栈 VPS 网关配置；把网关配置复制到双栈 VPS 后启动 `wg-quick@mybox-wg0`，再回到本机启动客户端并测试 IPv4。双栈 VPS 的 IPv4 转发和 MASQUERADE 规则会写入网关配置的 `PostUp` / `PostDown`。
+
 WARP 通过委托上游 fscarmen WARP 菜单实现，进入后由该菜单选择双栈 / 全局 / socks5 等模式。默认下载来源：
 
 - `https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh`

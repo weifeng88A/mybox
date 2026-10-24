@@ -977,6 +977,183 @@ option_run_nodequality() {
     "它会运行 NodeQuality 的 VPS 综合测评。"
 }
 
+wg_install_dependencies() {
+  if [ "$(id -u)" -ne 0 ]; then
+    err "WireGuard 出口配置需要 root，请先执行 sudo -i。"
+    return 1
+  fi
+  if have_cmd apt-get; then
+    apt-get update && apt-get install -y wireguard wireguard-tools iptables curl
+  elif have_cmd dnf; then
+    dnf install -y wireguard-tools iptables curl
+  elif have_cmd yum; then
+    yum install -y wireguard-tools iptables curl
+  else
+    err "未找到 apt-get、dnf 或 yum，无法自动安装 WireGuard。"
+    return 1
+  fi
+}
+wg_valid_ipv6() {
+  printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f:]+(%[A-Za-z0-9_.-]+)?$'
+}
+wg_write_gateway_config() {
+  local gateway_private="$1"
+  local client_public="$2"
+  local interface_name="$3"
+  local output="$4"
+  cat > "${output}" <<EOF
+# mybox WireGuard IPv4 gateway
+# Copy this file to the dual-stack VPS as /etc/wireguard/mybox-wg0.conf
+[Interface]
+Address = 10.66.0.1/24
+ListenPort = 51820
+PrivateKey = ${gateway_private}
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.66.0.0/24 -o ${interface_name} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.66.0.0/24 -o ${interface_name} -j MASQUERADE
+
+[Peer]
+PublicKey = ${client_public}
+AllowedIPs = 10.66.0.2/32
+EOF
+  chmod 600 "${output}"
+}
+wg_write_client_config() {
+  local client_private="$1"
+  local gateway_public="$2"
+  local gateway_ipv6="$3"
+  local output="$4"
+  cat > "${output}" <<EOF
+# mybox WireGuard IPv4 egress client
+[Interface]
+Address = 10.66.0.2/24
+PrivateKey = ${client_private}
+
+[Peer]
+PublicKey = ${gateway_public}
+Endpoint = [${gateway_ipv6}]:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+  chmod 600 "${output}"
+}
+option_wireguard_setup() {
+  local gateway_ipv6=""
+  local interface_name=""
+  local state_dir="/etc/mybox-wireguard"
+  local client_private=""
+  local client_public=""
+  local gateway_private=""
+  local gateway_public=""
+  local gateway_config="${state_dir}/mybox-wg0-gateway.conf"
+  local client_config="/etc/wireguard/mybox-wg0.conf"
+  if [ "$(id -u)" -ne 0 ]; then
+    err "请使用 root 运行 mybox 后再配置 WireGuard。"
+    return 1
+  fi
+  if ! have_cmd wg || ! have_cmd wg-quick; then
+    wg_install_dependencies || return 1
+  fi
+  prompt_read -p "请输入双栈 VPS 的 IPv6 地址（不带方括号）: " gateway_ipv6
+  gateway_ipv6="$(normalize_realm_host "${gateway_ipv6}")"
+  if ! wg_valid_ipv6 "${gateway_ipv6}"; then
+    err "IPv6 地址格式不正确。"
+    return 1
+  fi
+  prompt_read -p "双栈 VPS 的公网出口网卡 [eth0]: " interface_name
+  interface_name="${interface_name:-eth0}"
+  if ! printf '%s' "${interface_name}" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
+    err "网卡名称格式不正确。"
+    return 1
+  fi
+  install -d -m 0700 "${state_dir}" /etc/wireguard
+  if [ -s "${state_dir}/client_private" ] && [ -s "${state_dir}/gateway_private" ]; then
+    client_private="$(cat "${state_dir}/client_private")"
+    gateway_private="$(cat "${state_dir}/gateway_private")"
+  else
+    client_private="$(wg genkey)"
+    gateway_private="$(wg genkey)"
+    printf '%s\n' "${client_private}" > "${state_dir}/client_private"
+    printf '%s\n' "${gateway_private}" > "${state_dir}/gateway_private"
+    chmod 600 "${state_dir}/client_private" "${state_dir}/gateway_private"
+  fi
+  client_public="$(printf '%s' "${client_private}" | wg pubkey)"
+  gateway_public="$(printf '%s' "${gateway_private}" | wg pubkey)"
+  wg_write_gateway_config "${gateway_private}" "${client_public}" "${interface_name}" "${gateway_config}"
+  wg_write_client_config "${client_private}" "${gateway_public}" "${gateway_ipv6}" "${client_config}"
+  say "客户端配置已写入: ${client_config}"
+  say "双栈网关配置已写入: ${gateway_config}"
+  print_divider
+  say "第一步：把 ${gateway_config} 复制到双栈 VPS 的 /etc/wireguard/mybox-wg0.conf。"
+  say "第二步：在双栈 VPS 执行："
+  say "  apt-get update && apt-get install -y wireguard wireguard-tools iptables"
+  say "  sysctl --system"
+  say "  systemctl enable --now wg-quick@mybox-wg0"
+  say "第三步：放行双栈 VPS 的 UDP 51820（云安全组和系统防火墙）。"
+  say "第四步：确认双栈 VPS 已启动 WireGuard，然后回到本机继续。"
+  print_divider
+  prompt_read -p "双栈 VPS 已配置并启动 WireGuard？[y/N]: " choice
+  case "${choice}" in
+    y|Y)
+      systemctl enable --now wg-quick@mybox-wg0 || return 1
+      sleep 2
+      option_wireguard_status || true
+      ;;
+    *)
+      warn "客户端配置已生成，完成双栈 VPS 配置后可在菜单中选择“启动 / 测试 WireGuard”。"
+      ;;
+  esac
+}
+option_wireguard_status() {
+  if ! have_cmd wg; then
+    warn "WireGuard 尚未安装。"
+    return 1
+  fi
+  wg show mybox-wg0 2>/dev/null || true
+  if have_cmd curl; then
+    local ipv4=""
+    ipv4="$(curl -4 -fsS --connect-timeout 8 --max-time 15 https://api.ipify.org 2>/dev/null || true)"
+    if [ -n "${ipv4}" ]; then ok "IPv4 出口正常: ${ipv4}"; else err "IPv4 出口测试失败。"; fi
+  fi
+}
+option_wireguard_start() {
+  have_cmd wg-quick || { err "WireGuard 尚未安装。"; return 1; }
+  systemctl enable --now wg-quick@mybox-wg0
+  sleep 2
+  option_wireguard_status
+}
+option_wireguard_stop() {
+  have_cmd wg-quick || { err "WireGuard 尚未安装。"; return 1; }
+  systemctl disable --now wg-quick@mybox-wg0 || true
+}
+wireguard_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "WireGuard / IPv4 出口"
+    print_divider
+    menu_item "1" "生成配置并设置 WireGuard IPv4 出口"
+    menu_item "2" "查看隧道状态并测试 IPv4"
+    menu_item "3" "启动 / 重启 WireGuard"
+    menu_item "4" "停止 WireGuard"
+    menu_item "5" "查看双栈 VPS 网关配置"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_wireguard_setup || true ;;
+      2) option_wireguard_status || true ;;
+      3) option_wireguard_start || true ;;
+      4) option_wireguard_stop || true ;;
+      5) if [ -r /etc/mybox-wireguard/mybox-wg0-gateway.conf ]; then cat /etc/mybox-wireguard/mybox-wg0-gateway.conf; else warn "尚未生成网关配置。"; fi ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
 option_run_warp() {
   local warp_url=""
   warp_url="${WARP_INSTALLER_URL:-https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh}"
@@ -4767,6 +4944,7 @@ network_menu_loop() {
     menu_item "9" "安装 XanMod 内核 (BBRv3)"
     menu_item "10" "查看 XanMod / BBRv3 状态"
     menu_item "11" "NodeQuality 综合测评"
+    menu_item "12" "WireGuard / IPv4 出口"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -4783,6 +4961,7 @@ network_menu_loop() {
       9) option_install_xanmod ;;
       10) option_xanmod_info ;;
       11) option_run_nodequality ;;
+      12) wireguard_menu_loop ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
