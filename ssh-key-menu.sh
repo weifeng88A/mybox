@@ -3029,11 +3029,11 @@ realm_download_asset() {
     custom_url="${custom_url//\{asset\}/${asset}}"
     urls+=("${custom_url}")
   fi
-  # The official URL is tried first. The proxy URLs are only fallbacks for
-  # IPv6-only hosts whose provider cannot reach GitHub over IPv6.
+  # GitProxy is the preferred source because it is reachable from the
+  # user's IPv6-only VPS. Official GitHub and other mirrors remain fallbacks.
   urls+=(
-    "https://github.com/zhboner/realm/releases/latest/download/${asset}"
     "https://api.gitproxy.dev/github.com/zhboner/realm/releases/download/${gitproxy_version}/${asset}"
+    "https://github.com/zhboner/realm/releases/latest/download/${asset}"
     "https://ghproxy.net/https://github.com/zhboner/realm/releases/latest/download/${asset}"
     "https://gh-proxy.com/https://github.com/zhboner/realm/releases/latest/download/${asset}"
   )

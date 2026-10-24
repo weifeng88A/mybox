@@ -195,7 +195,7 @@ Nginx Proxy Manager 安装脚本来自：
 
 ### 纯 IPv6 VPS 的 Realm 下载
 
-Realm 安装会先尝试官方 GitHub Release，连接失败时自动回退到 IPv6 可访问的代理源。也可以使用自建代理或镜像，避免依赖公共代理：
+Realm 安装默认先使用 GitProxy（适合纯 IPv6 VPS），失败后再尝试官方 GitHub Release 和其他回退源。也可以使用自建代理或镜像，避免依赖公共代理：
 
 ```bash
 export REALM_DOWNLOAD_URL='https://你的镜像域名/realm/{asset}'
